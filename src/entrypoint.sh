@@ -17,7 +17,8 @@ echo " ==========================================="
 
 # Normalise le nom de service pour servir de clé de variable
 svc_key() {
-  echo "$1" | tr '[:lower:]-.' '[:upper:]__'
+  # dockerproxy-homepage -> DOCKERPROXY_HOMEPAGE
+  echo "$1" | tr '[:lower:]' '[:upper:]' | tr '.-' '__'
 }
 
 SERVICES=""
@@ -28,16 +29,17 @@ SERVICES=""
 for arg in "$@"; do
   case "$arg" in
     --*)
-      opt="${arg#--}"
-      name="${opt%%=*}"
-      val="${opt#*=}"
+      opt="${arg#--}"        # dockerproxy-homepage.containers=1
+      name="${opt%%=*}"      # dockerproxy-homepage.containers
+      val="${opt#*=}"        # 1 ou tout le bloc si pas de '='
+
       # Pas de "=", on considère que c'est =1
       if [ "$val" = "$name" ]; then
         val="1"
       fi
 
-      service="${name%%.*}"
-      flag="${name#*.}"
+      service="${name%%.*}"  # dockerproxy-homepage
+      flag="${name#*.}"      # containers
 
       # Ignore si pas de point
       if [ "$service" = "$name" ] || [ -z "$flag" ]; then
@@ -45,7 +47,7 @@ for arg in "$@"; do
       fi
 
       svc_var_key=$(svc_key "$service")
-      flag_var_key=$(echo "$flag" | tr '[:lower:]-.' '[:upper:]__')
+      flag_var_key=$(echo "$flag" | tr '[:lower:]' '[:upper:]' | tr '.-' '__')
 
       # Ajoute à la liste des services si nouveau
       case " $SERVICES " in
@@ -83,11 +85,12 @@ for s in $SERVICES; do
   fi
 done
 
-echo "  log level: ${LOG_LEVEL}"
+echo "   log level: ${LOG_LEVEL}"
 echo " ==========================================="
 
 mkdir -p "$(dirname "$HAPROXY_CFG")"
 
+# Header HAProxy
 {
   echo "global"
   echo "  log stdout format raw daemon"
@@ -142,6 +145,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
+# ACL d’host par service
 ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
@@ -150,6 +154,7 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
+# Interdit tout host qui n'est pas un alias de service
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
   echo "  http-request deny unless${ALLOWED_HOST_ACLS}" >> "$HAPROXY_CFG"
 fi
@@ -232,13 +237,13 @@ for service in $SERVICES; do
     # POST=0 => aucune écriture possible
     echo "  http-request deny if ${svc_acl} m_write" >> "$HAPROXY_CFG"
   else
-    # POST=1 => on autorise les écritures, mais on peut quand même bloquer start/stop/restart
+    # POST=1 => on autorise les écritures, mais on peut bloquer start/stop/restart
     if [ "$ALLOW_START" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_start" >> "$HAPROXY_CFG"
     fi
     if [ "$ALLOW_STOP" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
-    fi>
+    fi
     if [ "$ALLOW_RESTARTS" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
     fi
