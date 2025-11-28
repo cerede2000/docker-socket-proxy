@@ -110,6 +110,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
+  # Log complet avec alias + path avant / après rewrite
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -120,9 +122,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "frontend docker-socket-proxy"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
-  echo
-  # Log complet : alias + path avant/après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
@@ -169,7 +168,7 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
-  # 🔧 ICI : on met l'alias dans txn.service via str("...") (sinon erreur de fetch)
+  # on met l'alias dans txn.service via str("...") pour le log
   echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
@@ -188,7 +187,6 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
 
-  PING=$(get_flag("$service" "PING"))
   PING=$(get_flag "$service" "PING")
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
