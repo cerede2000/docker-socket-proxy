@@ -119,6 +119,9 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl m_read  method GET HEAD OPTIONS"
   echo "  acl m_write method POST PUT PATCH DELETE"
   echo
+  echo "  # Healthcheck local (127.0.0.1 -> /version)"
+  echo "  acl local_hc src 127.0.0.1"
+  echo
   echo "  # ACL de chemins communes (Docker API, avec ou sans prefix /vX.Y/)"
   echo "  acl path_ping         path_reg ^/(v[0-9.]+/)?_ping\$"
   echo "  acl path_version      path_reg ^/(v[0-9.]+/)?version\$"
@@ -158,14 +161,17 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# 🔧: autoriser toujours /version (path_version), même sans Host spécifique
+# 🔧: autoriser toujours /version pour le healthcheck local (127.0.0.1),
+# sinon exiger un Host correspondant à un service déclaré.
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  cond="path_version"
+  # (local_hc AND path_version) OR svc_PROXY_...
+  cond="local_hc path_version"
   for a in $ALLOWED_HOST_ACLS; do
     cond="$cond || $a"
   done
   echo "  http-request deny unless ${cond}" >> "$HAPROXY_CFG"
 fi
+
 
 # Règles par service
 for service in $SERVICES; do
