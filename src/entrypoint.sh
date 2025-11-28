@@ -121,8 +121,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
   echo
-  # Log complet AVEC host + path avant / après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq host:%[req.hdr(Host)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
+  # Log complet : alias + path avant/après rewrite
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
@@ -163,12 +163,14 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service
+# ACL d’host par service + variable alias
 ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
+  # On stocke l'alias dans txn.service quand ce host matche
+  echo "  http-request set-var(txn.service) \"${service}\" if ${svc_acl}" >> "$HAPROXY_CFG"
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
