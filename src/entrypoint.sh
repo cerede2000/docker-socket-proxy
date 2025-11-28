@@ -159,6 +159,9 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
+  echo "  # ACL spéciale pour /exec/... sans préfixe de version (exec start Portainer, etc.)"
+  echo "  acl path_exec_root    path_beg /exec/"
+  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
@@ -173,9 +176,9 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# 🔧: autoriser toujours /version (path_version), même sans Host
+# 🔧: autoriser toujours /version (path_version) + /exec/... (path_exec_root), même sans Host
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  cond="path_version"
+  cond="path_version || path_exec_root"
   for a in $ALLOWED_HOST_ACLS; do
     cond="$cond || $a"
   done
@@ -188,6 +191,7 @@ for service in $SERVICES; do
   svc_acl="svc_${svc_var_key}"
 
   PING=$(get_flag "$service" "PING")
+  VERSION=$(get_flag("$service" "VERSION") 2>/dev/null || get_flag "$service" "VERSION") # sécurité bash/sh (optionnel, tu peux garder simple)
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
 
