@@ -191,8 +191,7 @@ for service in $SERVICES; do
   svc_acl="svc_${svc_var_key}"
 
   PING=$(get_flag "$service" "PING")
-  VERSION=$(get_flag("$service" "VERSION") 2>/dev/null || get_flag "$service" "VERSION") # sécurité bash/sh (optionnel, tu peux garder simple)
-  VERSION=$(get_flag "$service" "VERSION")
+  VERSION_FLAG=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
 
   EVENTS=$(get_flag "$service" "EVENTS")
@@ -248,7 +247,7 @@ for service in $SERVICES; do
   # Liste des chemins autorisés pour ce service
   allowed=""
   [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
-  [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
+  [ "$VERSION_FLAG" -eq 1 ]  && allowed="$allowed path_version"
   [ "$INFO" -eq 1 ]          && allowed="$allowed path_info"
   [ "$EVENTS" -eq 1 ]        && allowed="$allowed path_events"
   [ "$AUTH" -eq 1 ]          && allowed="$allowed path_auth"
