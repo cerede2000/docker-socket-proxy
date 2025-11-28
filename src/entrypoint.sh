@@ -1,150 +1,201 @@
 #!/bin/sh
 set -eu
 
-CONFIG_FILE="/tmp/haproxy.cfg"
-SERVICES_FILE="/tmp/services_perms"
+# -----------------------------
+#  Meta / logs
+# -----------------------------
+APP_VERSION="${APP_VERSION:-dev}"
+APP_REVISION="${APP_REVISION:-dev}"
 
-: > "$SERVICES_FILE"
-
-DOCKER_SOCKET_PATH="${DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
-LISTEN_PORT="${SOCKET_PROXY_PORT:-2375}"
-
-# --------------------------------
-# Affichage version / SHA au démarrage
-# --------------------------------
-echo "docker-socket-proxy version: ${APP_VERSION:-unknown} (sha ${APP_GIT_SHA:-unknown})"
-echo "Using Docker socket: ${DOCKER_SOCKET_PATH}, listening on port ${LISTEN_PORT}"
-echo
+echo "==========================================="
+echo " docker-socket-proxy"
+echo "   version : ${APP_VERSION}"
+echo "   revision: ${APP_REVISION}"
+echo "   uid/gid : $(id -u):$(id -g)"
+echo "==========================================="
 
 # -----------------------------
-# Parsing des arguments
-#   --dockerproxy-traefik.ping=1
-#   --dockerproxy-watchtower.containers=1
+#  Paramètres de base
 # -----------------------------
+HAPROXY_CONFIG_DIR="${HAPROXY_CONFIG_DIR:-/usr/local/etc/haproxy}"
+HAPROXY_CONFIG_FILE="${HAPROXY_CONFIG_DIR}/haproxy.cfg"
+
+DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
+LISTEN_PORT="${LISTEN_PORT:-2375}"
+
+mkdir -p "${HAPROXY_CONFIG_DIR}"
+mkdir -p /run/haproxy
+
+# -----------------------------
+#  Parsing des arguments
+#  Attendu : --service.feature=1
+#  exemple : --dockerproxy-homepage.ping=1
+# -----------------------------
+SERVICES=""
+RULES=""
+
 for arg in "$@"; do
   case "$arg" in
-    --*)
-      arg="${arg#--}"           # supprime les "--"
-      key="${arg%%=*}"          # avant le "="
-      val="${arg#*=}"           # après le "="
-      [ "$key" = "$val" ] && val="1"   # si pas de "=", on assume 1
+    --*=*)
+      opt="${arg#--}"          # dockerproxy-homepage.ping=1
+      key="${opt%%=*}"         # dockerproxy-homepage.ping
+      val="${opt#*=}"          # 1
 
-      svc="${key%%.*}"
-      perm="${key#*.}"
+      # ignore les flags à 0 ou vides
+      [ -z "$val" ] && continue
+      [ "$val" = "0" ] && continue
 
-      [ -z "$svc" ] && continue
-      [ -z "$perm" ] && continue
-
-      case "$val" in
-        0|false|False|no|No) continue ;;  # désactivé
+      case "$key" in
+        *.*)
+          svc="${key%%.*}"     # dockerproxy-homepage
+          feat="${key#*.}"     # ping
+          ;;
+        *)
+          echo "WARN: argument ignoré (format invalide, attendu --service.feature=1) : $arg" >&2
+          continue
+          ;;
       esac
 
-      echo "$svc $perm" >> "$SERVICES_FILE"
+      # Ajoute le service à la liste s'il n'y est pas encore
+      case " $SERVICES " in
+        *" $svc "*) ;;
+        *) SERVICES="$SERVICES $svc" ;;
+      esac
+
+      # Mémorise la règle "svc.feature"
+      RULES="$RULES $svc.$feat"
+      ;;
+    *)
+      echo "WARN: argument ignoré (inconnu) : $arg" >&2
       ;;
   esac
 done
 
-services="$(awk '{print $1}' "$SERVICES_FILE" 2>/dev/null | sort -u || true)"
+# Nettoyage des espaces en tête
+SERVICES=$(echo "$SERVICES" | sed 's/^ *//')
+RULES=$(echo "$RULES" | sed 's/^ *//')
 
 # -----------------------------
-# Header HAProxy
+#  Génération du header HAProxy
 # -----------------------------
-cat > "$CONFIG_FILE" <<EOF
-global
-  log stdout format raw daemon
-  master-worker
+{
+  echo "global"
+  echo "  log stdout format raw daemon"
+  echo "  master-worker"
+  echo ""
+  echo "defaults"
+  echo "  log global"
+  echo "  mode http"
+  echo "  option httplog"
+  echo "  timeout connect 5s"
+  echo "  timeout client  60s"
+  echo "  timeout server  60s"
+  echo ""
+  echo "backend docker-sock"
+  echo "  server docker ${DOCKER_SOCKET}"
+  echo ""
+  echo "frontend docker-socket-proxy"
+  echo "  bind *:${LISTEN_PORT}"
+  echo "  mode http"
+} > "${HAPROXY_CONFIG_FILE}"
 
-defaults
-  log global
-  mode http
-  option httplog
-  timeout connect 5s
-  timeout client  60s
-  timeout server  60s
+# -----------------------------
+#  ACL Host par service
+#  + règle globale "deny unless <un des hosts>"
+# -----------------------------
+HOST_DENY_COND=""
 
-backend docker-sock
-  server docker ${DOCKER_SOCKET_PATH}
-EOF
+for svc in $SERVICES; do
+  # Nom safe pour les ACL haproxy (remplace tout sauf [A-Za-z0-9_] par _)
+  svc_id=$(echo "$svc" | tr -c 'A-Za-z0-9_' '_')
+  svc_acl="svc_${svc_id}"
 
-echo >> "$CONFIG_FILE"
-echo "frontend docker-socket-proxy" >> "$CONFIG_FILE"
-echo "  bind *:${LISTEN_PORT}" >> "$CONFIG_FILE"
-echo "  mode http" >> "$CONFIG_FILE"
+  # Host = <alias réseau> OU <alias réseau>:port
+  echo "  acl ${svc_acl} hdr_reg(host) -i ^${svc}(:[0-9]+)?\$" >> "${HAPROXY_CONFIG_FILE}"
 
-if [ -z "$services" ]; then
-  echo "  # Aucun service configuré -> on bloque tout" >> "$CONFIG_FILE"
-  echo "  http-request deny" >> "$CONFIG_FILE"
+  if [ -z "$HOST_DENY_COND" ]; then
+    HOST_DENY_COND="${svc_acl}"
+  else
+    HOST_DENY_COND="${HOST_DENY_COND} or ${svc_acl}"
+  fi
+done
+
+if [ -n "$HOST_DENY_COND" ]; then
+  echo "  http-request deny unless ${HOST_DENY_COND}" >> "${HAPROXY_CONFIG_FILE}"
 else
-  # -----------------------------
-  # ACL des hosts connus (alias réseau)
-  # -----------------------------
-  known_hosts_acl=""
-  for svc in $services; do
-    echo "  acl svc_${svc} hdr(host) -i ${svc}" >> "$CONFIG_FILE"
-    if [ -z "$known_hosts_acl" ]; then
-      known_hosts_acl="svc_${svc}"
-    else
-      known_hosts_acl="${known_hosts_acl} or svc_${svc}"
-    fi
-  done
-
-  # Tout host inconnu est refusé
-  echo "  http-request deny unless ${known_hosts_acl}" >> "$CONFIG_FILE"
-
-  # -----------------------------
-  # Permissions par service
-  # -----------------------------
-  for svc in $services; do
-    perms="$(awk -v s="$svc" '$1==s {print $2}' "$SERVICES_FILE" | tr '\n' ' ')"
-
-    ALLOWED_ACLS=""
-
-    for perm in $perms; do
-      case "$perm" in
-        ping)
-          echo "  acl ${svc}_ping path_reg ^/(v[0-9.]+/)?_ping\$" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_ping"
-          ;;
-        version)
-          echo "  acl ${svc}_version path_reg ^/(v[0-9.]+/)?version\$" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_version"
-          ;;
-        info)
-          echo "  acl ${svc}_info path_reg ^/(v[0-9.]+/)?info\$" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_info"
-          ;;
-        events)
-          echo "  acl ${svc}_events path_reg ^/(v[0-9.]+/)?events(/.*)?\$" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_events"
-          ;;
-        containers|images|networks|volumes|system)
-          echo "  acl ${svc}_${perm} path_reg ^/(v[0-9.]+/)?${perm}(/.*)?\$" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_${perm}"
-          ;;
-        post)
-          echo "  acl ${svc}_post method POST" >> "$CONFIG_FILE"
-          ALLOWED_ACLS="${ALLOWED_ACLS} ${svc}_post"
-          ;;
-        *)
-          echo "  # permission inconnue ignorée: ${svc}.${perm}" >> "$CONFIG_FILE"
-          ;;
-      esac
-    done
-
-    if [ -n "$ALLOWED_ACLS" ]; then
-      # si host = svc_X et qu'aucune ACL permise ne matche => deny
-      deny_line="  http-request deny if svc_${svc}"
-      for a in $ALLOWED_ACLS; do
-        deny_line="${deny_line} !${a}"
-      done
-      echo "$deny_line" >> "$CONFIG_FILE"
-    else
-      # aucun droit déclaré pour ce host => tout refusé
-      echo "  http-request deny if svc_${svc}" >> "$CONFIG_FILE"
-    fi
-  done
+  echo "  # Aucun service configuré -> tout refusé" >> "${HAPROXY_CONFIG_FILE}"
+  echo "  http-request deny" >> "${HAPROXY_CONFIG_FILE}"
 fi
 
-echo "  default_backend docker-sock" >> "$CONFIG_FILE"
+# -----------------------------
+#  ACL Path par service
+#  + deny si host match mais path non autorisé
+# -----------------------------
+for svc in $SERVICES; do
+  svc_id=$(echo "$svc" | tr -c 'A-Za-z0-9_' '_')
+  svc_acl="svc_${svc_id}"
+  ALLOWED_ACLS=""
 
-exec haproxy -f "$CONFIG_FILE" -db
+  for rule in $RULES; do
+    case "$rule" in
+      "$svc".*)
+        feat="${rule#*.}"     # ping / version / info / containers / events / images ...
+        acl_name="${svc_id}_${feat}"
+
+        case "$feat" in
+          ping)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?_ping\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          version)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?version\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          info)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?info\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          containers)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?containers(/.*)?\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          events)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?events(/.*)?\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          images)
+            echo "  acl ${acl_name} path_reg ^/(v[0-9.]+/)?images(/.*)?\$" >> "${HAPROXY_CONFIG_FILE}"
+            ;;
+          *)
+            echo "WARN: feature non supportée '${feat}' pour le service '${svc}'" >&2
+            continue
+            ;;
+        esac
+
+        case " $ALLOWED_ACLS " in
+          *" ${acl_name} "*) ;;
+          *) ALLOWED_ACLS="${ALLOWED_ACLS} ${acl_name}" ;;
+        esac
+        ;;
+    esac
+  done
+
+  ALLOWED_ACLS=$(echo "$ALLOWED_ACLS" | sed 's/^ *//')
+
+  if [ -n "$ALLOWED_ACLS" ]; then
+    # Exemple généré :
+    # http-request deny if svc_dockerproxy_homepage !dockerproxy_homepage_ping !dockerproxy_homepage_version ...
+    echo "  http-request deny if ${svc_acl} !${ALLOWED_ACLS}" >> "${HAPROXY_CONFIG_FILE}"
+  else
+    echo "  # Aucun path autorisé pour le host ${svc} -> tout refusé pour ce host" >> "${HAPROXY_CONFIG_FILE}"
+    echo "  http-request deny if ${svc_acl}" >> "${HAPROXY_CONFIG_FILE}"
+  fi
+done
+
+echo "  default_backend docker-sock" >> "${HAPROXY_CONFIG_FILE}"
+
+echo
+echo "===== Génération de la configuration HAProxy ====="
+sed 's/^/  > /' "${HAPROXY_CONFIG_FILE}"
+echo "=================================================="
+echo
+
+# -----------------------------
+#  Lancement d'HAProxy
+# -----------------------------
+exec haproxy -f "${HAPROXY_CONFIG_FILE}" -W -db
