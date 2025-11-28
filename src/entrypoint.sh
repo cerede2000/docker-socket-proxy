@@ -142,10 +142,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
-  echo "  # Healthcheck local direct sur /version"
-  echo "  acl hc_localhost hdr_reg(host) -i ^localhost(:[0-9]+)?\$"
-  echo "  http-request return status 200 content-type \"text/plain\" string \"OK\" if hc_localhost path_version"
-  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
@@ -158,15 +154,11 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# OR logique entre les hosts (||) au lieu de AND implicite
+# 🔧: autoriser toujours /version (path_version), même sans Host
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  cond=""
+  cond="path_version"
   for a in $ALLOWED_HOST_ACLS; do
-    if [ -z "$cond" ]; then
-      cond="$a"
-    else
-      cond="$cond || $a"
-    fi
+    cond="$cond || $a"
   done
   echo "  http-request deny unless ${cond}" >> "$HAPROXY_CFG"
 fi
