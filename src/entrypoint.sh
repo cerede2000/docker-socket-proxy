@@ -231,17 +231,13 @@ for service in $SERVICES; do
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
   # Si API_REWRITE défini -> rewrite de la version d'API
-  # ⚠️ uniquement pour /version et /info (pas tout /vX.Y/... afin d'éviter de casser exec/resize)
+    # Si API_REWRITE défini -> rewrite global de la version d'API
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
-    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (version/info only)" >> "$HAPROXY_CFG"
-    # /vX.Y/version -> /vAPI/version
-    echo "  http-request replace-path ^/v[0-9.]+/version\$ /v${API_REWRITE}/version if ${svc_acl} path_version" >> "$HAPROXY_CFG"
-    # /vX.Y/info -> /vAPI/info
-    echo "  http-request replace-path ^/v[0-9.]+/info\$ /v${API_REWRITE}/info if ${svc_acl} path_info" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/version -> /engine/api/vAPI/version
-    echo "  http-request replace-path ^/engine/api/v[0-9.]+/version\$ /engine/api/v${API_REWRITE}/version if ${svc_acl} path_version" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/info -> /engine/api/vAPI/info
-    echo "  http-request replace-path ^/engine/api/v[0-9.]+/info\$ /engine/api/v${API_REWRITE}/info if ${svc_acl} path_info" >> "$HAPROXY_CFG"
+    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
+    # /vX.Y/xxxx  -> /vAPI/xxxx
+    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/xxxx -> /engine/api/vAPI/xxxx
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
