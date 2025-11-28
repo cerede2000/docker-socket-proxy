@@ -169,8 +169,8 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
-  # On stocke l'alias dans txn.service quand ce host matche
-  echo "  http-request set-var(txn.service) \"${service}\" if ${svc_acl}" >> "$HAPROXY_CFG"
+  # 🔧 ICI : on met l'alias dans txn.service via str("...") (sinon erreur de fetch)
+  echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
@@ -188,6 +188,7 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
 
+  PING=$(get_flag("$service" "PING"))
   PING=$(get_flag "$service" "PING")
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
