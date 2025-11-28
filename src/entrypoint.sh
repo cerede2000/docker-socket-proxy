@@ -55,7 +55,7 @@ for arg in "$@"; do
         *) SERVICES="$SERVICES $service" ;;
       esac
 
-      eval "SERVICE_${svc_var_key}_${flag_var_key}=\"$val\""
+      eval "SERVICE_${svc_var_key}_${flag_var_key}=\"\$val\""
       ;;
   esac
 done
@@ -121,7 +121,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
   echo
-  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] execctx:%[sc0_gpc0] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]\""
+  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]\""
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
@@ -144,9 +144,9 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_cont_start   path_reg ^/(v[0-9.]+/)?containers/[^/]+/start\$"
   echo "  acl path_cont_stop    path_reg ^/(v[0-9.]+/)?containers/[^/]+/stop\$"
   echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\$"
-  echo "  acl path_cont_exec    path_reg ^/(v[0-9.]+/)?containers/[^/]+/exec\$"
   echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\$"
   echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\$"
+  echo "  # exec root (sans /vX.Y/) pour Portainer /exec/<id>/start"
   echo "  acl path_exec_root    path_reg ^/exec(/.*)?\$"
   echo "  acl path_images       path_reg ^/(v[0-9.]+/)?images(/.*)?\$"
   echo "  acl path_networks     path_reg ^/(v[0-9.]+/)?networks(/.*)?\$"
@@ -160,37 +160,22 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
-  echo "  # Stick-table : contexte exec par IP (Portainer)"
-  echo "  stick-table type ip size 1k expire 30s store gpc0"
-  echo "  acl has_exec_ctx sc0_gpc0 gt 0"
-  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service + alias pour les logs + tracking exec pour proxy-portainer
+# ACL d’host + alias de service
 ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
-
-  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?$" >> "$HAPROXY_CFG"
+  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
   echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
-
-  # ICI on ajoute pour proxy-portainer
-  if [ "$service" = "proxy-portainer" ]; then
-    # Quand Portainer fait POST /vX.Y/containers/<id>/exec, on marque l’IP dans la stick-table
-    echo "  http-request sc-inc-gpc0(0) if ${svc_acl} path_cont_exec m_write" >> "$HAPROXY_CFG"
-  fi
-
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# Autoriser :
-#   - /version (pour healthcheck)
-#   - /exec/... (root) UNIQUEMENT si has_exec_ctx (exec préparé via proxy-portainer)
-#   - tout ce qui matche un alias de service
+# Autoriser toujours /version (healthcheck) + /exec/... (Portainer) même sans Host alias
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  cond="path_version || path_exec_root has_exec_ctx"
+  cond="path_version || path_exec_root"
   for a in $ALLOWED_HOST_ACLS; do
     cond="$cond || $a"
   done
@@ -247,10 +232,12 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite global de la version d'API
+  # Rewrite de version d'API si demandé
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
     echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
+    # /vX.Y/... -> /vAPI/...
     echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/... -> /engine/api/vAPI/...
     echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
