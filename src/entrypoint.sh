@@ -110,8 +110,11 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # log complet avec path avant / après rewrite
+  # Log complet avec path avant / après rewrite
   echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
+  echo "  timeout connect 5s"
+  echo "  timeout client  60s"
+  echo "  timeout server  60s"
   echo
   echo "backend docker-sock"
   echo "  server docker ${SOCKET_PATH}"
@@ -122,6 +125,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
+  # Valeur par défaut de path_after = path initial (utile en cas de 403 early)
+  echo "  http-request set-var(txn.path_after) path"
   echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
@@ -183,7 +188,13 @@ for service in $SERVICES; do
   PING=$(get_flag "$service" "PING")
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
+
   EVENTS=$(get_flag "$service" "EVENTS")
+  # alias "event" → "EVENTS" si besoin
+  if [ "$EVENTS" -eq 0 ]; then
+    EVENTS=$(get_flag "$service" "EVENT")
+  fi
+
   AUTH=$(get_flag "$service" "AUTH")
   BUILD=$(get_flag "$service" "BUILD")
   COMMIT=$(get_flag "$service" "COMMIT")
@@ -206,7 +217,12 @@ for service in $SERVICES; do
   POST=$(get_flag "$service" "POST")
   ALLOW_START=$(get_flag "$service" "ALLOW_START")
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
+
   ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
+  # alias "allow_restart" → "ALLOW_RESTARTS"
+  if [ "$ALLOW_RESTARTS" -eq 0 ]; then
+    ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTART")
+  fi
 
   # lecture APIREWRITE brute (ex: 1.51)
   API_REWRITE=$(get_value "$service" "APIREWRITE")
@@ -214,13 +230,18 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite de la version d'API uniquement pour cet host
+  # Si API_REWRITE défini -> rewrite de la version d'API
+  # ⚠️ uniquement pour /version et /info (pas tout /vX.Y/... afin d'éviter de casser exec/resize)
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
-    echo "  # API version rewrite for ${service} -> v${API_REWRITE}" >> "$HAPROXY_CFG"
-    # /vX.Y/... -> /vAPI_REWRITE/...
-    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/... -> /engine/api/vAPI_REWRITE/...
-    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (version/info only)" >> "$HAPROXY_CFG"
+    # /vX.Y/version -> /vAPI/version
+    echo "  http-request replace-path ^/v[0-9.]+/version\$ /v${API_REWRITE}/version if ${svc_acl} path_version" >> "$HAPROXY_CFG"
+    # /vX.Y/info -> /vAPI/info
+    echo "  http-request replace-path ^/v[0-9.]+/info\$ /v${API_REWRITE}/info if ${svc_acl} path_info" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/version -> /engine/api/vAPI/version
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+/version\$ /engine/api/v${API_REWRITE}/version if ${svc_acl} path_version" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/info -> /engine/api/vAPI/info
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+/info\$ /engine/api/v${API_REWRITE}/info if ${svc_acl} path_info" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
