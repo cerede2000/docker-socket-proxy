@@ -201,12 +201,12 @@ for service in $SERVICES; do
   TASKS=$(get_flag "$service" "TASKS")
   VOLUMES=$(get_flag "$service" "VOLUMES")
 
-  POST=$(get_flag "$service" "POST")
-  ALLOW_START=$(get_flag "$service" "ALLOW_START")
-  ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
-  ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
+  POST=$(get_flag("$service" "POST") 2>/dev/null || echo 0)
+  ALLOW_START=$(get_flag("$service" "ALLOW_START") 2>/dev/null || echo 0)
+  ALLOW_STOP=$(get_flag("$service" "ALLOW_STOP") 2>/dev/null || echo 0)
+  ALLOW_RESTARTS=$(get_flag("$service" "ALLOW_RESTARTS") 2>/dev/null || echo 0)
 
-  # Valeur brute pour apirewrite (ex: 1.52)
+  # Valeur brute pour apirewrite (ex: 1.51)
   APIREWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
@@ -216,9 +216,9 @@ for service in $SERVICES; do
   if [ -n "$APIREWRITE" ]; then
     echo "  # API version rewrite for ${service} -> v${APIREWRITE}" >> "$HAPROXY_CFG"
     # /vX.Y/... -> /v${APIREWRITE}/...
-    echo "  http-request replace-path ^(/v)[0-9.]+(/.*)\$ \1${APIREWRITE}\2 if ${svc_acl}" >> "$HAPROXY_CFG"
+    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${APIREWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
     # /engine/api/vX.Y/... -> /engine/api/v${APIREWRITE}/...
-    echo "  http-request replace-path ^(/engine/api/v)[0-9.]+(/.*)\$ \1${APIREWRITE}\2 if ${svc_acl}" >> "$HAPROXY_CFG"
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${APIREWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
