@@ -108,7 +108,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  server docker ${SOCKET_PATH}"
   echo
   echo "frontend docker-socket-proxy"
-  echo "  bind :${PROXY_PORT} v4v6"
+  echo "  bind :${PROXY_PORT}"
   echo "  mode http"
   echo
   echo "  # Méthodes HTTP"
