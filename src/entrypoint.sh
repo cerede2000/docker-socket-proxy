@@ -142,6 +142,10 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
+  echo "  # Healthcheck local direct sur /version"
+  echo "  acl hc_localhost hdr_reg(host) -i ^localhost(:[0-9]+)?\$"
+  echo "  http-request return status 200 content-type \"text/plain\" string \"OK\" if hc_localhost path_version"
+  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
@@ -154,7 +158,7 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# 🔧 FIX : OR logique entre les hosts (||) au lieu de AND implicite
+# OR logique entre les hosts (||) au lieu de AND implicite
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
   cond=""
   for a in $ALLOWED_HOST_ACLS; do
