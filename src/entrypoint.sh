@@ -113,6 +113,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
+  echo "  acl m_post  method POST"
   echo "  acl m_write method POST PUT PATCH DELETE"
   echo
   echo "  # ACL de chemins communes (Docker API, avec ou sans prefix /vX.Y/)"
@@ -195,7 +196,7 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Liste des chemins autorisés pour ce service
+  # Liste des chemins autorisés pour ce service (lecture)
   allowed=""
   [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
   [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
@@ -232,20 +233,20 @@ for service in $SERVICES; do
     echo "  http-request deny if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
-  # Gestion des méthodes en écriture (POST/PUT/PATCH/DELETE)
+  # Gestion de la méthode POST
   if [ "$POST" -eq 0 ]; then
-    # POST=0 => aucune écriture possible
-    echo "  http-request deny if ${svc_acl} m_write" >> "$HAPROXY_CFG"
+    # POST=0 => aucune requête HTTP POST pour ce service
+    echo "  http-request deny if ${svc_acl} m_post" >> "$HAPROXY_CFG"
   else
-    # POST=1 => on autorise les écritures, mais on peut bloquer start/stop/restart
+    # POST=1 => on autorise POST, mais on peut bloquer start/stop/restart
     if [ "$ALLOW_START" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_write path_cont_start" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_post path_cont_start" >> "$HAPROXY_CFG"
     fi
     if [ "$ALLOW_STOP" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_post path_cont_stop" >> "$HAPROXY_CFG"
     fi
     if [ "$ALLOW_RESTARTS" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_post path_cont_restart" >> "$HAPROXY_CFG"
     fi
   fi
 done
