@@ -73,10 +73,10 @@ get_flag() {
   esac
 }
 
-# Helper pour lire une valeur texte (ex: APIREWRITE)
-get_str() {
+# Helper pour lire une valeur brute (string) d'un service
+get_value() {
   service="$1"
-  key="$2"
+  key="$2" # déjà UPPERCASE avec underscores
   svc_var_key=$(svc_key "$service")
   var="SERVICE_${svc_var_key}_${key}"
   eval "val=\${$var-}"
@@ -110,6 +110,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
+  # Log complet avec path avant / après rewrite
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -121,57 +123,61 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
   echo
+  echo "  # Debug : mémoriser le path initial pour le log"
+  echo "  http-request set-var(txn.path_before) path"
+  # Valeur par défaut de path_after = path initial (utile en cas de 403 early)
+  echo "  http-request set-var(txn.path_after) path"
+  echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
   echo "  acl m_write method POST PUT PATCH DELETE"
   echo
   echo "  # ACL de chemins communes (Docker API, avec ou sans prefix /vX.Y/)"
-  echo "  acl path_ping         path_reg ^/(v[0-9.]+/)?_ping\\$"
-  echo "  acl path_version      path_reg ^/(v[0-9.]+/)?version\\$"
-  echo "  acl path_info         path_reg ^/(v[0-9.]+/)?info\\$"
+  echo "  acl path_ping         path_reg ^/(v[0-9.]+/)?_ping\$"
+  echo "  acl path_version      path_reg ^/(v[0-9.]+/)?version\$"
+  echo "  acl path_info         path_reg ^/(v[0-9.]+/)?info\$"
   echo "  acl path_events       path_reg ^/(v[0-9.]+/)?events"
-  echo "  acl path_auth         path_reg ^/(v[0-9.]+/)?auth(/.*)?\\$"
-  echo "  acl path_build        path_reg ^/(v[0-9.]+/)?build(/.*)?\\$"
-  echo "  acl path_commit       path_reg ^/(v[0-9.]+/)?commit(/.*)?\\$"
-  echo "  acl path_configs      path_reg ^/(v[0-9.]+/)?configs(/.*)?\\$"
-  echo "  acl path_containers   path_reg ^/(v[0-9.]+/)?containers(/.*)?\\$"
-  echo "  acl path_cont_start   path_reg ^/(v[0-9.]+/)?containers/[^/]+/start\\$"
-  echo "  acl path_cont_stop    path_reg ^/(v[0-9.]+/)?containers/[^/]+/stop\\$"
-  echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\\$"
-  echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\\$"
-  echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\\$"
-  echo "  acl path_images       path_reg ^/(v[0-9.]+/)?images(/.*)?\\$"
-  echo "  acl path_networks     path_reg ^/(v[0-9.]+/)?networks(/.*)?\\$"
-  echo "  acl path_nodes        path_reg ^/(v[0-9.]+/)?nodes(/.*)?\\$"
-  echo "  acl path_plugins      path_reg ^/(v[0-9.]+/)?plugins(/.*)?\\$"
-  echo "  acl path_secrets      path_reg ^/(v[0-9.]+/)?secrets(/.*)?\\$"
-  echo "  acl path_services     path_reg ^/(v[0-9.]+/)?services(/.*)?\\$"
-  echo "  acl path_session      path_reg ^/(v[0-9.]+/)?session(/.*)?\\$"
-  echo "  acl path_swarm        path_reg ^/(v[0-9.]+/)?swarm(/.*)?\\$"
-  echo "  acl path_system       path_reg ^/(v[0-9.]+/)?system(/.*)?\\$"
-  echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\\$"
-  echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\\$"
-  echo
-  echo "  # On capture le Host pour les logs (alias du service)"
-  echo "  capture request header Host len 64"
+  echo "  acl path_auth         path_reg ^/(v[0-9.]+/)?auth(/.*)?\$"
+  echo "  acl path_build        path_reg ^/(v[0-9.]+/)?build(/.*)?\$"
+  echo "  acl path_commit       path_reg ^/(v[0-9.]+/)?commit(/.*)?\$"
+  echo "  acl path_configs      path_reg ^/(v[0-9.]+/)?configs(/.*)?\$"
+  echo "  acl path_containers   path_reg ^/(v[0-9.]+/)?containers(/.*)?\$"
+  echo "  acl path_cont_start   path_reg ^/(v[0-9.]+/)?containers/[^/]+/start\$"
+  echo "  acl path_cont_stop    path_reg ^/(v[0-9.]+/)?containers/[^/]+/stop\$"
+  echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\$"
+  echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\$"
+  echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\$"
+  echo "  acl path_images       path_reg ^/(v[0-9.]+/)?images(/.*)?\$"
+  echo "  acl path_networks     path_reg ^/(v[0-9.]+/)?networks(/.*)?\$"
+  echo "  acl path_nodes        path_reg ^/(v[0-9.]+/)?nodes(/.*)?\$"
+  echo "  acl path_plugins      path_reg ^/(v[0-9.]+/)?plugins(/.*)?\$"
+  echo "  acl path_secrets      path_reg ^/(v[0-9.]+/)?secrets(/.*)?\$"
+  echo "  acl path_services     path_reg ^/(v[0-9.]+/)?services(/.*)?\$"
+  echo "  acl path_session      path_reg ^/(v[0-9.]+/)?session(/.*)?\$"
+  echo "  acl path_swarm        path_reg ^/(v[0-9.]+/)?swarm(/.*)?\$"
+  echo "  acl path_system       path_reg ^/(v[0-9.]+/)?system(/.*)?\$"
+  echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
+  echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service + construction de la liste des hosts autorisés
-ALLOWED_HOST_PATTERNS=""
+# ACL d’host par service
+ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
-  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\\$" >> "$HAPROXY_CFG"
-  ALLOWED_HOST_PATTERNS="$ALLOWED_HOST_PATTERNS ^${service}(:[0-9]+)?\\$"
+  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
+  ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# Règle globale : on refuse toute requête dont le Host n'est pas connu
-# SAUF si c'est /version (healthcheck local sans Host)
-if [ -n "$ALLOWED_HOST_PATTERNS" ]; then
-  echo "  acl allowed_hosts hdr_reg(host) -i${ALLOWED_HOST_PATTERNS}" >> "$HAPROXY_CFG"
-  echo "  http-request deny if !allowed_hosts !path_version" >> "$HAPROXY_CFG"
+# 🔧: autoriser toujours /version (path_version), même sans Host
+if [ -n "$ALLOWED_HOST_ACLS" ]; then
+  cond="path_version"
+  for a in $ALLOWED_HOST_ACLS; do
+    cond="$cond || $a"
+  done
+  echo "  http-request deny unless ${cond}" >> "$HAPROXY_CFG"
 fi
 
 # Règles par service
@@ -182,7 +188,13 @@ for service in $SERVICES; do
   PING=$(get_flag "$service" "PING")
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
+
   EVENTS=$(get_flag "$service" "EVENTS")
+  # alias "event" → "EVENTS" si besoin
+  if [ "$EVENTS" -eq 0 ]; then
+    EVENTS=$(get_flag "$service" "EVENT")
+  fi
+
   AUTH=$(get_flag "$service" "AUTH")
   BUILD=$(get_flag "$service" "BUILD")
   COMMIT=$(get_flag "$service" "COMMIT")
@@ -205,18 +217,27 @@ for service in $SERVICES; do
   POST=$(get_flag "$service" "POST")
   ALLOW_START=$(get_flag "$service" "ALLOW_START")
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
-  # FIX : cohérent avec --proxy-xxx.allow_restart=1
-  ALLOW_RESTART=$(get_flag "$service" "ALLOW_RESTART")
-  APIREWRITE=$(get_str "$service" "APIREWRITE")
+
+  ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
+  # alias "allow_restart" → "ALLOW_RESTARTS"
+  if [ "$ALLOW_RESTARTS" -eq 0 ]; then
+    ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTART")
+  fi
+
+  # lecture APIREWRITE brute (ex: 1.51)
+  API_REWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Réécriture de version d'API si demandé pour ce service
-  if [ -n "$APIREWRITE" ]; then
-    echo "  # API version rewrite for service ${service} -> v${APIREWRITE}" >> "$HAPROXY_CFG"
-    echo "  http-request replace-path ^(/v)[0-9.]+(/.*)\\$ \\1${APIREWRITE}\\2 if ${svc_acl}" >> "$HAPROXY_CFG"
-    echo "  http-request replace-path ^(/engine/api/v)[0-9.]+(/.*)\\$ \\1${APIREWRITE}\\2 if ${svc_acl}" >> "$HAPROXY_CFG"
+  # Si API_REWRITE défini -> rewrite de la version d'API
+    # Si API_REWRITE défini -> rewrite global de la version d'API
+  if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
+    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
+    # /vX.Y/xxxx  -> /vAPI/xxxx
+    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/xxxx -> /engine/api/vAPI/xxxx
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
@@ -268,13 +289,15 @@ for service in $SERVICES; do
     if [ "$ALLOW_STOP" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
     fi
-    if [ "$ALLOW_RESTART" -eq 0 ]; then
+    if [ "$ALLOW_RESTARTS" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
     fi
   fi
 done
 
-echo >> "$HAPROXY_CFG"
+echo "" >> "$HAPROXY_CFG"
+# Debug : path final après éventuels rewrites
+echo "  http-request set-var(txn.path_after) path" >> "$HAPROXY_CFG"
 echo "  default_backend docker-sock" >> "$HAPROXY_CFG"
 
 echo
