@@ -172,8 +172,8 @@ for service in $SERVICES; do
   svc_acl="svc_${svc_var_key}"
 
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
-  # On mémorise l'alias dans txn.service pour le log
-  echo "  http-request set-var(txn.service) \"${service}\" if ${svc_acl}" >> "$HAPROXY_CFG"
+  # IMPORTANT : valeur string => str("...") pour éviter l'erreur "unknown fetch method"
+  echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
 
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 
@@ -192,7 +192,6 @@ if [ "$HAS_PORTAINER" -eq 1 ]; then
   echo "  http-request track-sc0 src if svc_PROXY_PORTAINER path_containers path_exec m_write" >> "$HAPROXY_CFG"
 fi
 
-# ACL : cette IP a un contexte exec, et la requête est sur /exec/... (sans /vX.Y/)
 echo "  acl has_exec_ctx sc0_http_req_cnt gt 0" >> "$HAPROXY_CFG"
 echo "  acl allow_exec_ctx path_exec_root has_exec_ctx" >> "$HAPROXY_CFG"
 
@@ -249,20 +248,14 @@ for service in $SERVICES; do
     ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTART")
   fi
 
-  # lecture APIREWRITE brute (ex: 1.51)
+  # lecture APIREWRITE brute (ex: 1.51) — NON utilisée ici pour simplifier
+  API_REWRITE
   API_REWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite global de la version d'API, uniquement pour ce service
-  if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
-    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
-    # /vX.Y/xxxx  -> /vAPI/xxxx
-    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/xxxx -> /engine/api/vAPI/xxxx
-    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-  fi
+  # (Si tu veux réactiver le rewrite de version, on pourra remettre ici un bloc replace-path conditionné à API_REWRITE)
 
   # Liste des chemins autorisés pour ce service
   allowed=""
