@@ -1,257 +1,256 @@
 #!/bin/sh
-set -e
+set -eu
 
-SOCKET_PROXY_VERSION="${SOCKET_PROXY_VERSION:-main}"
-SOCKET_PROXY_REVISION="${SOCKET_PROXY_REVISION:-dev}"
+VERSION="${DOCKER_SOCKET_PROXY_VERSION:-main}"
+REVISION="${DOCKER_SOCKET_PROXY_REVISION:-dev}"
+SOCKET_PATH="${SOCKET_PATH:-/var/run/docker.sock}"
+PROXY_PORT="${PROXY_PORT:-2375}"
+HAPROXY_CFG="${HAPROXY_CFG:-/usr/local/etc/haproxy/haproxy.cfg}"
 
-echo "==========================================="
+echo " ==========================================="
 echo "  docker-socket-proxy"
-echo "    version : ${SOCKET_PROXY_VERSION}"
-echo "    revision: ${SOCKET_PROXY_REVISION}"
+echo "    version : ${VERSION}"
+echo "    revision: ${REVISION}"
 echo "    uid/gid : $(id -u):$(id -g)"
-echo "==========================================="
+echo " ==========================================="
 
-CFG_DIR="/tmp/haproxy"
-CFG_FILE="${CFG_DIR}/haproxy.cfg"
-RULES_FILE="${CFG_DIR}/rules.list"
+# Normalise le nom de service pour servir de clé de variable
+svc_key() {
+  echo "$1" | tr '[:lower:]-.' '[:upper:]__'
+}
 
-mkdir -p "${CFG_DIR}"
-
-# -------------------------------------------------------------------
-# 1) Parse des arguments : --alias.key=value
-#    Ex: --dockerproxy-homepage.containers=1
-# -------------------------------------------------------------------
-RULES=""
 SERVICES=""
 
-while [ "$#" -gt 0 ]; do
-    arg="$1"
-    shift
+# Parse les arguments du type:
+#   --dockerproxy-homepage.containers=1
+#   --dockerproxy-watchtower.post=1
+for arg in "$@"; do
+  case "$arg" in
+    --*)
+      opt="${arg#--}"
+      name="${opt%%=*}"
+      val="${opt#*=}"
+      # Pas de "=", on considère que c'est =1
+      if [ "$val" = "$name" ]; then
+        val="1"
+      fi
 
-    case "${arg}" in
-        --*=*)
-            opt="${arg#--}"         # dockerproxy-homepage.containers=1
-            svc="${opt%%.*}"        # dockerproxy-homepage
-            rest="${opt#*.}"        # containers=1
-            key="${rest%%=*}"       # containers
-            val="${rest#*=}"        # 1
+      service="${name%%.*}"
+      flag="${name#*.}"
 
-            # normalisation en minuscule
-            key=$(echo "${key}" | tr 'A-Z' 'a-z')
+      # Ignore si pas de point
+      if [ "$service" = "$name" ] || [ -z "$flag" ]; then
+        continue
+      fi
 
-            # normalisation des variantes éventuelles
-            case "${key}" in
-                allow_restarts|allow_restart|allowrestarts)
-                    key="allow_restarts"
-                    ;;
-            esac
+      svc_var_key=$(svc_key "$service")
+      flag_var_key=$(echo "$flag" | tr '[:lower:]-.' '[:upper:]__')
 
-            SERVICES="${SERVICES} ${svc}"
-            RULES="${RULES}
-${svc}.${key}=${val}"
-            ;;
-        *)
-            echo "WARN: argument ignoré (format non supporté) : ${arg}" >&2
-            ;;
-    esac
+      # Ajoute à la liste des services si nouveau
+      case " $SERVICES " in
+        *" $service "*) ;;
+        *) SERVICES="$SERVICES $service" ;;
+      esac
+
+      eval "SERVICE_${svc_var_key}_${flag_var_key}=\"$val\""
+      ;;
+  esac
 done
 
-# Sauvegarde brute des règles (simple à re-parcourir)
-printf '%s\n' "${RULES}" > "${RULES_FILE}"
+# Helper pour lire un flag booléen d'un service
+get_flag() {
+  service="$1"
+  key="$2" # déjà UPPERCASE avec underscores
+  svc_var_key=$(svc_key "$service")
+  var="SERVICE_${svc_var_key}_${key}"
+  eval "val=\${$var-}"
+  case "$val" in
+    1|true|TRUE|yes|YES|on|ON) echo 1 ;;
+    *) echo 0 ;;
+  esac
+}
 
-# Déduplication simple des alias
-UNIQUE_SERVICES=""
-for svc in ${SERVICES}; do
-    case " ${UNIQUE_SERVICES} " in
-        *" ${svc} "*)
-            ;;
-        *)
-            UNIQUE_SERVICES="${UNIQUE_SERVICES} ${svc}"
-            ;;
-    esac
+# Premier LOG_LEVEL trouvé (facultatif, surtout pour info)
+LOG_LEVEL="info"
+for s in $SERVICES; do
+  svc_var_key=$(svc_key "$s")
+  var="SERVICE_${svc_var_key}_LOG_LEVEL"
+  eval "lvl=\${$var-}"
+  if [ -n "$lvl" ]; then
+    LOG_LEVEL="$lvl"
+    break
+  fi
 done
 
-# -------------------------------------------------------------------
-# 2) Génération de la config HAProxy
-# -------------------------------------------------------------------
+echo "  log level: ${LOG_LEVEL}"
+echo " ==========================================="
+
+mkdir -p "$(dirname "$HAPROXY_CFG")"
+
 {
-    cat <<'EOF'
-global
-  log stdout format raw daemon
-  master-worker
+  echo "global"
+  echo "  log stdout format raw daemon"
+  echo "  master-worker"
+  echo
+  echo "defaults"
+  echo "  log global"
+  echo "  mode http"
+  echo "  option httplog"
+  echo "  timeout connect 5s"
+  echo "  timeout client  60s"
+  echo "  timeout server  60s"
+  echo
+  echo "backend docker-sock"
+  echo "  server docker ${SOCKET_PATH}"
+  echo
+  echo "frontend docker-socket-proxy"
+  echo "  bind *:${PROXY_PORT}"
+  echo "  mode http"
+  echo
+  echo "  # Méthodes HTTP"
+  echo "  acl m_read  method GET HEAD OPTIONS"
+  echo "  acl m_write method POST PUT PATCH DELETE"
+  echo
+  echo "  # ACL de chemins communes (Docker API, avec ou sans prefix /vX.Y/)"
+  echo "  acl path_ping         path_reg ^/(v[0-9.]+/)?_ping\$"
+  echo "  acl path_version      path_reg ^/(v[0-9.]+/)?version\$"
+  echo "  acl path_info         path_reg ^/(v[0-9.]+/)?info\$"
+  echo "  acl path_events       path_reg ^/(v[0-9.]+/)?events"
+  echo "  acl path_auth         path_reg ^/(v[0-9.]+/)?auth(/.*)?\$"
+  echo "  acl path_build        path_reg ^/(v[0-9.]+/)?build(/.*)?\$"
+  echo "  acl path_commit       path_reg ^/(v[0-9.]+/)?commit(/.*)?\$"
+  echo "  acl path_configs      path_reg ^/(v[0-9.]+/)?configs(/.*)?\$"
+  echo "  acl path_containers   path_reg ^/(v[0-9.]+/)?containers(/.*)?\$"
+  echo "  acl path_cont_start   path_reg ^/(v[0-9.]+/)?containers/[^/]+/start\$"
+  echo "  acl path_cont_stop    path_reg ^/(v[0-9.]+/)?containers/[^/]+/stop\$"
+  echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\$"
+  echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\$"
+  echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\$"
+  echo "  acl path_images       path_reg ^/(v[0-9.]+/)?images(/.*)?\$"
+  echo "  acl path_networks     path_reg ^/(v[0-9.]+/)?networks(/.*)?\$"
+  echo "  acl path_nodes        path_reg ^/(v[0-9.]+/)?nodes(/.*)?\$"
+  echo "  acl path_plugins      path_reg ^/(v[0-9.]+/)?plugins(/.*)?\$"
+  echo "  acl path_secrets      path_reg ^/(v[0-9.]+/)?secrets(/.*)?\$"
+  echo "  acl path_services     path_reg ^/(v[0-9.]+/)?services(/.*)?\$"
+  echo "  acl path_session      path_reg ^/(v[0-9.]+/)?session(/.*)?\$"
+  echo "  acl path_swarm        path_reg ^/(v[0-9.]+/)?swarm(/.*)?\$"
+  echo "  acl path_system       path_reg ^/(v[0-9.]+/)?system(/.*)?\$"
+  echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
+  echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
+  echo
+  echo "  # ACL d'hôtes / aliases de services"
+} > "$HAPROXY_CFG"
 
-defaults
-  log global
-  mode http
-  option httplog
-  timeout connect 5s
-  timeout client  60s
-  timeout server  60s
-
-backend docker-sock
-  server docker /var/run/docker.sock
-
-frontend docker-socket-proxy
-  bind *:2375
-  mode http
-EOF
-} > "${CFG_FILE}"
-
-# 2.1) ACL host par service + deny global sur les hosts inconnus
-HOST_ACLS=""
-
-for svc in ${UNIQUE_SERVICES}; do
-    [ -z "${svc}" ] && continue
-    aclname="svc_${svc}_"
-    echo "  acl ${aclname} hdr_reg(host) -i ^${svc}(:[0-9]+)?\$" >> "${CFG_FILE}"
-    HOST_ACLS="${HOST_ACLS} ${aclname}"
+ALLOWED_HOST_ACLS=""
+for service in $SERVICES; do
+  svc_var_key=$(svc_key "$service")
+  svc_acl="svc_${svc_var_key}"
+  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
+  ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-if [ -n "${HOST_ACLS}" ]; then
-    # On n'accepte que les hosts déclarés
-    printf "  http-request deny unless" >> "${CFG_FILE}"
-    for h in ${HOST_ACLS}; do
-        printf " %s" "${h}" >> "${CFG_FILE}"
-    done
-    printf "\n" >> "${CFG_FILE}"
+if [ -n "$ALLOWED_HOST_ACLS" ]; then
+  echo "  http-request deny unless${ALLOWED_HOST_ACLS}" >> "$HAPROXY_CFG"
 fi
 
-# 2.2) Pour chaque service, on construit une allow-list par familles d’API
-for svc in ${UNIQUE_SERVICES}; do
-    [ -z "${svc}" ] && continue
+# Règles par service
+for service in $SERVICES; do
+  svc_var_key=$(svc_key "$service")
+  svc_acl="svc_${svc_var_key}"
 
-    # flags pour ce service
-    has_ping=0
-    has_version=0
-    has_info=0
-    has_events=0
-    has_auth=0
-    has_build=0
-    has_commit=0
-    has_distribution=0
-    has_exec=0
-    has_system=0
-    has_session=0
+  PING=$(get_flag "$service" "PING")
+  VERSION=$(get_flag "$service" "VERSION")
+  INFO=$(get_flag "$service" "INFO")
+  EVENTS=$(get_flag "$service" "EVENTS")
+  AUTH=$(get_flag "$service" "AUTH")
+  BUILD=$(get_flag "$service" "BUILD")
+  COMMIT=$(get_flag "$service" "COMMIT")
+  CONFIGS=$(get_flag "$service" "CONFIGS")
+  CONTAINERS=$(get_flag "$service" "CONTAINERS")
+  DISTRIBUTION=$(get_flag "$service" "DISTRIBUTION")
+  EXEC=$(get_flag "$service" "EXEC")
+  IMAGES=$(get_flag "$service" "IMAGES")
+  NETWORKS=$(get_flag "$service" "NETWORKS")
+  NODES=$(get_flag "$service" "NODES")
+  PLUGINS=$(get_flag "$service" "PLUGINS")
+  SECRETS=$(get_flag "$service" "SECRETS")
+  SERVICES_FLAG=$(get_flag "$service" "SERVICES")
+  SESSION=$(get_flag "$service" "SESSION")
+  SWARM=$(get_flag "$service" "SWARM")
+  SYSTEM=$(get_flag "$service" "SYSTEM")
+  TASKS=$(get_flag "$service" "TASKS")
+  VOLUMES=$(get_flag "$service" "VOLUMES")
 
-    has_containers=0
-    has_images=0
-    has_networks=0
-    has_volumes=0
-    has_services_flag=0
-    has_tasks=0
-    has_nodes=0
-    has_swarm=0
-    has_plugins=0
-    has_secrets=0
-    has_configs=0
+  POST=$(get_flag "$service" "POST")
+  ALLOW_START=$(get_flag "$service" "ALLOW_START")
+  ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
+  ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
 
-    # on lit toutes les règles et on garde celles de ce service
-    while IFS='= ' read -r lhs rhs; do
-        [ -z "${lhs}" ] && continue
+  echo "" >> "$HAPROXY_CFG"
+  echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-        case "${lhs}" in
-            "${svc}."*)
-                key="${lhs#${svc}.}"
-                val="${rhs}"
+  # Liste des chemins autorisés pour ce service
+  allowed=""
+  [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
+  [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
+  [ "$INFO" -eq 1 ]          && allowed="$allowed path_info"
+  [ "$EVENTS" -eq 1 ]        && allowed="$allowed path_events"
+  [ "$AUTH" -eq 1 ]          && allowed="$allowed path_auth"
+  [ "$BUILD" -eq 1 ]         && allowed="$allowed path_build"
+  [ "$COMMIT" -eq 1 ]        && allowed="$allowed path_commit"
+  [ "$CONFIGS" -eq 1 ]       && allowed="$allowed path_configs"
+  [ "$CONTAINERS" -eq 1 ]    && allowed="$allowed path_containers"
+  [ "$DISTRIBUTION" -eq 1 ]  && allowed="$allowed path_distribution"
+  [ "$EXEC" -eq 1 ]          && allowed="$allowed path_exec"
+  [ "$IMAGES" -eq 1 ]        && allowed="$allowed path_images"
+  [ "$NETWORKS" -eq 1 ]      && allowed="$allowed path_networks"
+  [ "$NODES" -eq 1 ]         && allowed="$allowed path_nodes"
+  [ "$PLUGINS" -eq 1 ]       && allowed="$allowed path_plugins"
+  [ "$SECRETS" -eq 1 ]       && allowed="$allowed path_secrets"
+  [ "$SERVICES_FLAG" -eq 1 ] && allowed="$allowed path_services"
+  [ "$SESSION" -eq 1 ]       && allowed="$allowed path_session"
+  [ "$SWARM" -eq 1 ]         && allowed="$allowed path_swarm"
+  [ "$SYSTEM" -eq 1 ]        && allowed="$allowed path_system"
+  [ "$TASKS" -eq 1 ]         && allowed="$allowed path_tasks"
+  [ "$VOLUMES" -eq 1 ]       && allowed="$allowed path_volumes"
 
-                [ "${val}" != "1" ] && continue
+  if [ -n "$allowed" ]; then
+    neg=""
+    for p in $allowed; do
+      neg="$neg !$p"
+    done
+    # si host = service mais path non dans la liste -> 403
+    echo "  http-request deny if ${svc_acl}${neg}" >> "$HAPROXY_CFG"
+  else
+    # si aucun chemin autorisé pour ce service -> tout refuser
+    echo "  http-request deny if ${svc_acl}" >> "$HAPROXY_CFG"
+  fi
 
-                case "${key}" in
-                    ping)          has_ping=1 ;;
-                    version)       has_version=1 ;;
-                    info)          has_info=1 ;;
-                    events)        has_events=1 ;;
-                    auth)          has_auth=1 ;;
-                    build)         has_build=1 ;;
-                    commit)        has_commit=1 ;;
-                    distribution)  has_distribution=1 ;;
-                    exec)          has_exec=1 ;;
-                    system)        has_system=1 ;;
-                    session)       has_session=1 ;;
-
-                    containers)    has_containers=1 ;;
-                    images)        has_images=1 ;;
-                    networks)      has_networks=1 ;;
-                    volumes)       has_volumes=1 ;;
-                    services)      has_services_flag=1 ;;
-                    tasks)         has_tasks=1 ;;
-                    nodes)         has_nodes=1 ;;
-                    swarm)         has_swarm=1 ;;
-                    plugins)       has_plugins=1 ;;
-                    secrets)       has_secrets=1 ;;
-                    configs)       has_configs=1 ;;
-
-                    # POST/DELETE/ALLOW_* sont acceptés mais, pour l’instant,
-                    # on ne les utilise pas dans la génération des règles.
-                    post)              ;;
-                    delete)            ;;
-                    allow_start)       ;;
-                    allow_stop)        ;;
-                    allow_restarts)    ;;
-                    log_level)         ;;
-                    *)
-                        echo "WARN: clé '${key}' non gérée pour service '${svc}'" >&2
-                        ;;
-                esac
-                ;;
-        esac
-    done < "${RULES_FILE}"
-
-    ALLOW_ACLS=""
-
-    # Fonctions utilitaires
-    add_acl() {
-        acl_name="$1"
-        acl_rule="$2"
-        echo "  acl ${acl_name} ${acl_rule}" >> "${CFG_FILE}"
-        ALLOW_ACLS="${ALLOW_ACLS} ${acl_name}"
-    }
-
-    # --- Endpoints globaux (ping/version/info/events/auth/...) ---
-    [ "${has_ping}" -eq 1 ]         && add_acl "${svc}__ping"         'path_reg ^/(v[0-9.]+/)?_ping$'
-    [ "${has_version}" -eq 1 ]      && add_acl "${svc}__version"      'path_reg ^/(v[0-9.]+/)?version$'
-    [ "${has_info}" -eq 1 ]         && add_acl "${svc}__info"         'path_reg ^/(v[0-9.]+/)?info$'
-    [ "${has_events}" -eq 1 ]       && add_acl "${svc}__events"       'path_reg ^/(v[0-9.]+/)?events(/.*)?$'
-    [ "${has_auth}" -eq 1 ]         && add_acl "${svc}__auth"         'path_reg ^/(v[0-9.]+/)?auth(/.*)?$'
-    [ "${has_build}" -eq 1 ]        && add_acl "${svc}__build"        'path_reg ^/(v[0-9.]+/)?build(/.*)?$'
-    [ "${has_commit}" -eq 1 ]       && add_acl "${svc}__commit"       'path_reg ^/(v[0-9.]+/)?commit(/.*)?$'
-    [ "${has_distribution}" -eq 1 ] && add_acl "${svc}__distribution" 'path_reg ^/(v[0-9.]+/)?distribution(/.*)?$'
-    [ "${has_exec}" -eq 1 ]         && add_acl "${svc}__exec"         'path_reg ^/(v[0-9.]+/)?containers/[^/]+/exec(/.*)?$'
-    [ "${has_system}" -eq 1 ]       && add_acl "${svc}__system"       'path_reg ^/(v[0-9.]+/)?system(/.*)?$'
-    [ "${has_session}" -eq 1 ]      && add_acl "${svc}__session"      'path_reg ^/(v[0-9.]+/)?session(/.*)?$'
-
-    # --- Familles de ressources (containers/images/networks/...) ---
-    [ "${has_containers}" -eq 1 ]   && add_acl "${svc}__containers"   'path_reg ^/(v[0-9.]+/)?containers(/.*)?$'
-    [ "${has_images}" -eq 1 ]       && add_acl "${svc}__images"       'path_reg ^/(v[0-9.]+/)?images(/.*)?$'
-    [ "${has_networks}" -eq 1 ]     && add_acl "${svc}__networks"     'path_reg ^/(v[0-9.]+/)?networks(/.*)?$'
-    [ "${has_volumes}" -eq 1 ]      && add_acl "${svc}__volumes"      'path_reg ^/(v[0-9.]+/)?volumes(/.*)?$'
-    [ "${has_services_flag}" -eq 1 ]&& add_acl "${svc}__services"     'path_reg ^/(v[0-9.]+/)?services(/.*)?$'
-    [ "${has_tasks}" -eq 1 ]        && add_acl "${svc}__tasks"        'path_reg ^/(v[0-9.]+/)?tasks(/.*)?$'
-    [ "${has_nodes}" -eq 1 ]        && add_acl "${svc}__nodes"        'path_reg ^/(v[0-9.]+/)?nodes(/.*)?$'
-    [ "${has_swarm}" -eq 1 ]        && add_acl "${svc}__swarm"        'path_reg ^/(v[0-9.]+/)?swarm(/.*)?$'
-    [ "${has_plugins}" -eq 1 ]      && add_acl "${svc}__plugins"      'path_reg ^/(v[0-9.]+/)?plugins(/.*)?$'
-    [ "${has_secrets}" -eq 1 ]      && add_acl "${svc}__secrets"      'path_reg ^/(v[0-9.]+/)?secrets(/.*)?$'
-    [ "${has_configs}" -eq 1 ]      && add_acl "${svc}__configs"      'path_reg ^/(v[0-9.]+/)?configs(/.*)?$'
-
-    if [ -n "${ALLOW_ACLS}" ]; then
-        # deny par défaut : on n’autorise que les ACL de la liste
-        printf "  http-request deny if svc_%s_" "${svc}" >> "${CFG_FILE}"
-        for a in ${ALLOW_ACLS}; do
-            printf " !%s" "${a}" >> "${CFG_FILE}"
-        done
-        printf "\n" >> "${CFG_FILE}"
-    else
-        # aucun droit pour ce service => tout est refusé
-        echo "  http-request deny if svc_${svc}_" >> "${CFG_FILE}"
+  # Gestion des méthodes en écriture (POST/PUT/PATCH/DELETE)
+  if [ "$POST" -eq 0 ]; then
+    # POST=0 => aucune écriture possible
+    echo "  http-request deny if ${svc_acl} m_write" >> "$HAPROXY_CFG"
+  else
+    # POST=1 => on autorise les écritures, mais on peut quand même bloquer start/stop/restart
+    if [ "$ALLOW_START" -eq 0 ]; then
+      echo "  http-request deny if ${svc_acl} m_write path_cont_start" >> "$HAPROXY_CFG"
     fi
+    if [ "$ALLOW_STOP" -eq 0 ]; then
+      echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
+    fi
+    if [ "$ALLOW_RESTARTS" -eq 0 ]; then
+      echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
+    fi
+  fi
 done
 
-echo "  default_backend docker-sock" >> "${CFG_FILE}"
+echo >> "$HAPROXY_CFG"
+echo "  default_backend docker-sock" >> "$HAPROXY_CFG"
 
-echo "=== haproxy configuration generated ==="
-cat "${CFG_FILE}"
+echo
+echo "Generated HAProxy configuration:"
+echo "--------------------------------"
+cat "$HAPROXY_CFG"
+echo "--------------------------------"
 
-# -------------------------------------------------------------------
-# 3) Lancement de HAProxy
-# -------------------------------------------------------------------
-exec haproxy -f "${CFG_FILE}" -W -db
+exec haproxy -W -db -f "$HAPROXY_CFG"
