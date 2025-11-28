@@ -17,20 +17,20 @@ echo " ==========================================="
 
 # Normalise le nom de service pour servir de clé de variable
 svc_key() {
-  # dockerproxy-homepage -> DOCKERPROXY_HOMEPAGE
+  # ex: proxy-homepage -> PROXY_HOMEPAGE
   echo "$1" | tr '[:lower:]' '[:upper:]' | tr '.-' '__'
 }
 
 SERVICES=""
 
 # Parse les arguments du type:
-#   --dockerproxy-homepage.containers=1
-#   --dockerproxy-watchtower.post=1
+#   --proxy-homepage.containers=1
+#   --proxy-watchtower.post=1
 for arg in "$@"; do
   case "$arg" in
     --*)
-      opt="${arg#--}"        # dockerproxy-homepage.containers=1
-      name="${opt%%=*}"      # dockerproxy-homepage.containers
+      opt="${arg#--}"        # proxy-homepage.containers=1
+      name="${opt%%=*}"      # proxy-homepage.containers
       val="${opt#*=}"        # 1 ou tout le bloc si pas de '='
 
       # Pas de "=", on considère que c'est =1
@@ -38,7 +38,7 @@ for arg in "$@"; do
         val="1"
       fi
 
-      service="${name%%.*}"  # dockerproxy-homepage
+      service="${name%%.*}"  # proxy-homepage
       flag="${name#*.}"      # containers
 
       # Ignore si pas de point
@@ -113,7 +113,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
-  echo "  acl m_post  method POST"
   echo "  acl m_write method POST PUT PATCH DELETE"
   echo
   echo "  # ACL de chemins communes (Docker API, avec ou sans prefix /vX.Y/)"
@@ -155,9 +154,17 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# Interdit tout host qui n'est pas un alias de service
+# 🔧 FIX : OR logique entre les hosts (||) au lieu de AND implicite
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  echo "  http-request deny unless${ALLOWED_HOST_ACLS}" >> "$HAPROXY_CFG"
+  cond=""
+  for a in $ALLOWED_HOST_ACLS; do
+    if [ -z "$cond" ]; then
+      cond="$a"
+    else
+      cond="$cond || $a"
+    fi
+  done
+  echo "  http-request deny unless ${cond}" >> "$HAPROXY_CFG"
 fi
 
 # Règles par service
@@ -196,7 +203,7 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Liste des chemins autorisés pour ce service (lecture)
+  # Liste des chemins autorisés pour ce service
   allowed=""
   [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
   [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
@@ -233,20 +240,20 @@ for service in $SERVICES; do
     echo "  http-request deny if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
-  # Gestion de la méthode POST
+  # Gestion de POST / méthodes en écriture
   if [ "$POST" -eq 0 ]; then
-    # POST=0 => aucune requête HTTP POST pour ce service
-    echo "  http-request deny if ${svc_acl} m_post" >> "$HAPROXY_CFG"
+    # POST=0 => aucune écriture possible
+    echo "  http-request deny if ${svc_acl} m_write" >> "$HAPROXY_CFG"
   else
-    # POST=1 => on autorise POST, mais on peut bloquer start/stop/restart
+    # POST=1 => on autorise les écritures, mais on peut bloquer start/stop/restart
     if [ "$ALLOW_START" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_post path_cont_start" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_write path_cont_start" >> "$HAPROXY_CFG"
     fi
     if [ "$ALLOW_STOP" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_post path_cont_stop" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
     fi
     if [ "$ALLOW_RESTARTS" -eq 0 ]; then
-      echo "  http-request deny if ${svc_acl} m_post path_cont_restart" >> "$HAPROXY_CFG"
+      echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
     fi
   fi
 done
