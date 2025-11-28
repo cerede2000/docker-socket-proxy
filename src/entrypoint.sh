@@ -121,7 +121,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
   echo
-  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]\""
+  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] execctx:%[sc0_gpc0] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]\""
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
@@ -161,8 +161,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
   echo "  # Stick-table : contexte exec par IP (Portainer)"
-  echo "  stick-table type ip size 1k expire 30s store http_req_cnt"
-  echo "  acl has_exec_ctx sc0_http_req_cnt gt 0"
+  echo "  stick-table type ip size 1k expire 30s store gpc0"
+  echo "  acl has_exec_ctx sc0_gpc0 gt 0"
   echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
@@ -173,13 +173,13 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
 
-  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
+  echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?$" >> "$HAPROXY_CFG"
   echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
 
-  # Suivi du contexte exec uniquement pour proxy-portainer
+  # ICI on ajoute pour proxy-portainer
   if [ "$service" = "proxy-portainer" ]; then
-    # On track la requête POST /vX.Y/containers/<id>/exec
-    echo "  http-request track-sc0 src if ${svc_acl} path_cont_exec m_write" >> "$HAPROXY_CFG"
+    # Quand Portainer fait POST /vX.Y/containers/<id>/exec, on marque l’IP dans la stick-table
+    echo "  http-request sc-inc-gpc0(0) if ${svc_acl} path_cont_exec m_write" >> "$HAPROXY_CFG"
   fi
 
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
