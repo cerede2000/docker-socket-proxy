@@ -110,8 +110,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # Log complet avec alias + path avant / après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -123,9 +121,11 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
   echo
+  # Log avec alias + path before/after
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq alias:%[var(txn.service)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
+  echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
-  # Valeur par défaut de path_after = path initial (utile en cas de 403 early)
   echo "  http-request set-var(txn.path_after) path"
   echo
   echo "  # Méthodes HTTP"
@@ -147,6 +147,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\$"
   echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\$"
   echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\$"
+  echo "  acl path_exec_root    path_reg ^/exec(/.*)?\$"
   echo "  acl path_images       path_reg ^/(v[0-9.]+/)?images(/.*)?\$"
   echo "  acl path_networks     path_reg ^/(v[0-9.]+/)?networks(/.*)?\$"
   echo "  acl path_nodes        path_reg ^/(v[0-9.]+/)?nodes(/.*)?\$"
@@ -159,26 +160,45 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
-  echo "  # ACL spéciale pour /exec/... sans préfixe de version (exec start Portainer, etc.)"
-  echo "  acl path_exec_root    path_beg /exec/"
-  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service + variable alias
+# ACL d’host par service + alias logging
 ALLOWED_HOST_ACLS=""
+HAS_PORTAINER=0
+
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
+
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
-  # on met l'alias dans txn.service via str("...") pour le log
-  echo "  http-request set-var(txn.service) str(\"${service}\") if ${svc_acl}" >> "$HAPROXY_CFG"
+  # On mémorise l'alias dans txn.service pour le log
+  echo "  http-request set-var(txn.service) \"${service}\" if ${svc_acl}" >> "$HAPROXY_CFG"
+
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
+
+  # On note si on a un proxy-portainer (pour la stick-table exec)
+  if [ "$service" = "proxy-portainer" ]; then
+    HAS_PORTAINER=1
+  fi
 done
 
-# 🔧: autoriser toujours /version (path_version) + /exec/... (path_exec_root), même sans Host
+# Stick-table & contexte exec (par IP) pour gérer /exec/.../start sans Host
+echo "  # Stick-table: suivi du contexte exec par IP" >> "$HAPROXY_CFG"
+echo "  stick-table type ip size 1k expire 30s store http_req_cnt" >> "$HAPROXY_CFG"
+
+if [ "$HAS_PORTAINER" -eq 1 ]; then
+  # On marque les IP qui créent un exec via proxy-portainer
+  echo "  http-request track-sc0 src if svc_PROXY_PORTAINER path_containers path_exec m_write" >> "$HAPROXY_CFG"
+fi
+
+# ACL : cette IP a un contexte exec, et la requête est sur /exec/... (sans /vX.Y/)
+echo "  acl has_exec_ctx sc0_http_req_cnt gt 0" >> "$HAPROXY_CFG"
+echo "  acl allow_exec_ctx path_exec_root has_exec_ctx" >> "$HAPROXY_CFG"
+
+# 🔧: autoriser toujours /version (path_version), et /exec root avec contexte, même sans Host
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
-  cond="path_version || path_exec_root"
+  cond="path_version || allow_exec_ctx"
   for a in $ALLOWED_HOST_ACLS; do
     cond="$cond || $a"
   done
@@ -191,7 +211,7 @@ for service in $SERVICES; do
   svc_acl="svc_${svc_var_key}"
 
   PING=$(get_flag "$service" "PING")
-  VERSION_FLAG=$(get_flag "$service" "VERSION")
+  VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
 
   EVENTS=$(get_flag "$service" "EVENTS")
@@ -235,7 +255,7 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite global de la version d'API
+  # Si API_REWRITE défini -> rewrite global de la version d'API, uniquement pour ce service
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
     echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
     # /vX.Y/xxxx  -> /vAPI/xxxx
@@ -247,7 +267,7 @@ for service in $SERVICES; do
   # Liste des chemins autorisés pour ce service
   allowed=""
   [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
-  [ "$VERSION_FLAG" -eq 1 ]  && allowed="$allowed path_version"
+  [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
   [ "$INFO" -eq 1 ]          && allowed="$allowed path_info"
   [ "$EVENTS" -eq 1 ]        && allowed="$allowed path_events"
   [ "$AUTH" -eq 1 ]          && allowed="$allowed path_auth"
