@@ -73,7 +73,7 @@ get_flag() {
   esac
 }
 
-# Helper pour lire une valeur "brute" (ex: APIREWRITE=1.52)
+# Helper pour lire une valeur brute (string) d'un service
 get_value() {
   service="$1"
   key="$2" # déjà UPPERCASE avec underscores
@@ -110,9 +110,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  echo "  timeout connect 5s"
-  echo "  timeout client  60s"
-  echo "  timeout server  60s"
+  # log complet avec path avant / après rewrite
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo
   echo "backend docker-sock"
   echo "  server docker ${SOCKET_PATH}"
@@ -120,6 +119,9 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "frontend docker-socket-proxy"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
+  echo
+  echo "  # Debug : mémoriser le path initial pour le log"
+  echo "  http-request set-var(txn.path_before) path"
   echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
@@ -206,19 +208,19 @@ for service in $SERVICES; do
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
   ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
 
-  # Valeur brute pour apirewrite (ex: 1.52)
-  APIREWRITE=$(get_value "$service" "APIREWRITE")
+  # lecture APIREWRITE brute (ex: 1.51)
+  API_REWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Réécriture de version d'API pour ce service (ex: /v1.44/... -> /v1.52/...)
-  if [ -n "$APIREWRITE" ]; then
-    echo "  # API version rewrite for ${service} -> v${APIREWRITE}" >> "$HAPROXY_CFG"
-    # /vX.Y/... -> /v${APIREWRITE}/...
-    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${APIREWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/... -> /engine/api/v${APIREWRITE}/...
-    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${APIREWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+  # Si API_REWRITE défini -> rewrite de la version d'API uniquement pour cet host
+  if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
+    echo "  # API version rewrite for ${service} -> v${API_REWRITE}" >> "$HAPROXY_CFG"
+    # /vX.Y/... -> /vAPI_REWRITE/...
+    echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/... -> /engine/api/vAPI_REWRITE/...
+    echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
@@ -276,7 +278,9 @@ for service in $SERVICES; do
   fi
 done
 
-echo >> "$HAPROXY_CFG"
+echo "" >> "$HAPROXY_CFG"
+# Debug : path final après éventuels rewrites
+echo "  http-request set-var(txn.path_after) path" >> "$HAPROXY_CFG"
 echo "  default_backend docker-sock" >> "$HAPROXY_CFG"
 
 echo
