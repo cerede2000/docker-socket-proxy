@@ -17,14 +17,15 @@ echo "==========================================="
 # -----------------------------
 #  Paramètres de base
 # -----------------------------
-HAPROXY_CONFIG_DIR="${HAPROXY_CONFIG_DIR:-/usr/local/etc/haproxy}"
+# IMPORTANT : par défaut on met la conf dans /tmp
+# pour être compatible avec read_only + tmpfs:/tmp
+HAPROXY_CONFIG_DIR="${HAPROXY_CONFIG_DIR:-/tmp/haproxy}"
 HAPROXY_CONFIG_FILE="${HAPROXY_CONFIG_DIR}/haproxy.cfg"
 
 DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
 LISTEN_PORT="${LISTEN_PORT:-2375}"
 
 mkdir -p "${HAPROXY_CONFIG_DIR}"
-mkdir -p /run/haproxy
 
 # -----------------------------
 #  Parsing des arguments
@@ -178,7 +179,7 @@ for svc in $SERVICES; do
   ALLOWED_ACLS=$(echo "$ALLOWED_ACLS" | sed 's/^ *//')
 
   if [ -n "$ALLOWED_ACLS" ]; then
-    # Exemple généré :
+    # Exemple :
     # http-request deny if svc_dockerproxy_homepage !dockerproxy_homepage_ping !dockerproxy_homepage_version ...
     echo "  http-request deny if ${svc_acl} !${ALLOWED_ACLS}" >> "${HAPROXY_CONFIG_FILE}"
   else
