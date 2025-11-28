@@ -249,7 +249,6 @@ for service in $SERVICES; do
   fi
 
   # lecture APIREWRITE brute (ex: 1.51) — NON utilisée ici pour simplifier
-  API_REWRITE
   API_REWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
