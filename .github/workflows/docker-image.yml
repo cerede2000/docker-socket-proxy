@@ -7,7 +7,7 @@ on:
     tags:
       - 'v*'
     paths:
-      - src/watcher.py
+      - src/entrypoint.py
   workflow_dispatch:
 
 env:
