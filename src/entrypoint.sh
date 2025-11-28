@@ -73,6 +73,16 @@ get_flag() {
   esac
 }
 
+# Helper pour lire une valeur brute d'un service (ex: APIREWRITE=1.52)
+get_value() {
+  service="$1"
+  key="$2" # déjà UPPERCASE avec underscores
+  svc_var_key=$(svc_key "$service")
+  var="SERVICE_${svc_var_key}_${key}"
+  eval "val=\${$var-}"
+  echo "$val"
+}
+
 # Premier LOG_LEVEL trouvé (facultatif, surtout pour info)
 LOG_LEVEL="info"
 for s in $SERVICES; do
@@ -196,8 +206,20 @@ for service in $SERVICES; do
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
   ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
 
+  # Valeur brute pour apirewrite (ex: 1.52)
+  APIREWRITE=$(get_value "$service" "APIREWRITE")
+
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
+
+  # Réécriture de version d'API pour ce service
+  if [ -n "$APIREWRITE" ]; then
+    echo "  # API version rewrite for ${service} -> v${APIREWRITE}" >> "$HAPROXY_CFG"
+    # /vX.Y/... -> /v${APIREWRITE}/...
+    echo "  http-request replace-path ^(/v)[0-9.]+(/.*)\$ \1${APIREWRITE}\2 if ${svc_acl}" >> "$HAPROXY_CFG"
+    # /engine/api/vX.Y/... -> /engine/api/v${APIREWRITE}/...
+    echo "  http-request replace-path ^(/engine/api/v)[0-9.]+(/.*)\$ \1${APIREWRITE}\2 if ${svc_acl}" >> "$HAPROXY_CFG"
+  fi
 
   # Liste des chemins autorisés pour ce service
   allowed=""
