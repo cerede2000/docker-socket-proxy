@@ -110,8 +110,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # Log complet avec path avant / après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq host:%[hdr(host)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -122,6 +120,9 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "frontend docker-socket-proxy"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
+  echo
+  # Log complet AVEC host + path avant / après rewrite
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq host:%[req.hdr(Host)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo
   echo "  # Debug : mémoriser le path initial pour le log"
   echo "  http-request set-var(txn.path_before) path"
@@ -230,8 +231,7 @@ for service in $SERVICES; do
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite de la version d'API
-    # Si API_REWRITE défini -> rewrite global de la version d'API
+  # Si API_REWRITE défini -> rewrite global de la version d'API
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
     echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
     # /vX.Y/xxxx  -> /vAPI/xxxx
