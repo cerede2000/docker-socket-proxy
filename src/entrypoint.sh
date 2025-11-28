@@ -111,7 +111,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  mode http"
   echo "  option httplog"
   # Log complet avec path avant / après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
+  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq host:%[hdr(host)] %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
