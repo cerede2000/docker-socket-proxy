@@ -1,0 +1,18 @@
+services:
+  docker-socket-proxy:
+    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    user: "107:108"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefikfront
+    command:
+      - --dockerproxy-traefik.ping=1
+      - --dockerproxy-traefik.version=1
+      - --dockerproxy-watchtower.info=1
+      - --dockerproxy-watchtower.events=1
+    restart: unless-stopped
