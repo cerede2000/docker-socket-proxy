@@ -26,6 +26,7 @@ SERVICES=""
 # Parse les arguments du type:
 #   --proxy-homepage.containers=1
 #   --proxy-watchtower.post=1
+#   --proxy-portainer.apirewrite=1.51
 for arg in "$@"; do
   case "$arg" in
     --*)
@@ -39,7 +40,7 @@ for arg in "$@"; do
       fi
 
       service="${name%%.*}"  # proxy-homepage
-      flag="${name#*.}"      # containers
+      flag="${name#*.}"      # containers / apirewrite / ...
 
       # Ignore si pas de point
       if [ "$service" = "$name" ] || [ -z "$flag" ]; then
@@ -48,6 +49,11 @@ for arg in "$@"; do
 
       svc_var_key=$(svc_key "$service")
       flag_var_key=$(echo "$flag" | tr '[:lower:]' '[:upper:]' | tr '.-' '__')
+      # Exemple:
+      #  service=proxy-portainer, flag=apirewrite
+      #  -> svc_var_key=PROXY_PORTAINER
+      #  -> flag_var_key=APIREWRITE
+      #  -> variable = SERVICE_PROXY_PORTAINER_APIREWRITE
 
       # Ajoute à la liste des services si nouveau
       case " $SERVICES " in
@@ -71,16 +77,6 @@ get_flag() {
     1|true|TRUE|yes|YES|on|ON) echo 1 ;;
     *) echo 0 ;;
   esac
-}
-
-# Helper pour lire une valeur brute (string) d'un service
-get_value() {
-  service="$1"
-  key="$2" # déjà UPPERCASE avec underscores
-  svc_var_key=$(svc_key "$service")
-  var="SERVICE_${svc_var_key}_${key}"
-  eval "val=\${$var-}"
-  echo "$val"
 }
 
 # Premier LOG_LEVEL trouvé (facultatif, surtout pour info)
@@ -110,8 +106,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # Log complet avec path avant / après rewrite
-  echo '  log-format "%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HU path-before:%[var(txn.path_before)] path-after:%[var(txn.path_after)]"'
+  # log-format : on log la méthode, le path, le Host et les vars de rewrite
+  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HP host:%[req.hdr(host)] svc:%[var(tx.service)] path-before:%[var(tx.path_before)] path-after:%[var(tx.path_after)]\""
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -122,11 +118,6 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "frontend docker-socket-proxy"
   echo "  bind [::]:${PROXY_PORT} v4v6"
   echo "  mode http"
-  echo
-  echo "  # Debug : mémoriser le path initial pour le log"
-  echo "  http-request set-var(txn.path_before) path"
-  # Valeur par défaut de path_after = path initial (utile en cas de 403 early)
-  echo "  http-request set-var(txn.path_after) path"
   echo
   echo "  # Méthodes HTTP"
   echo "  acl m_read  method GET HEAD OPTIONS"
@@ -162,12 +153,14 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service
+# ACL d’host par service + var(tx.service)
 ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
+  # on stocke le nom du service dans une var pour le log
+  echo "  http-request set-var(tx.service) str(${service}) if ${svc_acl}" >> "$HAPROXY_CFG"
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
@@ -188,13 +181,7 @@ for service in $SERVICES; do
   PING=$(get_flag "$service" "PING")
   VERSION=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
-
   EVENTS=$(get_flag "$service" "EVENTS")
-  # alias "event" → "EVENTS" si besoin
-  if [ "$EVENTS" -eq 0 ]; then
-    EVENTS=$(get_flag "$service" "EVENT")
-  fi
-
   AUTH=$(get_flag "$service" "AUTH")
   BUILD=$(get_flag "$service" "BUILD")
   COMMIT=$(get_flag "$service" "COMMIT")
@@ -217,27 +204,22 @@ for service in $SERVICES; do
   POST=$(get_flag "$service" "POST")
   ALLOW_START=$(get_flag "$service" "ALLOW_START")
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
-
   ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
-  # alias "allow_restart" → "ALLOW_RESTARTS"
-  if [ "$ALLOW_RESTARTS" -eq 0 ]; then
-    ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTART")
-  fi
 
-  # lecture APIREWRITE brute (ex: 1.51)
-  API_REWRITE=$(get_value "$service" "APIREWRITE")
+  # APIREWRITE est une **valeur** (ex : 1.51), pas un bool
+  api_rewrite_var="SERVICE_${svc_var_key}_APIREWRITE"
+  eval "API_REWRITE=\${$api_rewrite_var-}"
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite de la version d'API
-    # Si API_REWRITE défini -> rewrite global de la version d'API
+  # 🔁 Rewrite d'API version uniquement pour ce service s'il a apirewrite
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
-    echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
-    # /vX.Y/xxxx  -> /vAPI/xxxx
+    echo "  # API version rewrite for ${service} -> v${API_REWRITE}" >> "$HAPROXY_CFG"
+    echo "  http-request set-var(tx.path_before) path if ${svc_acl}" >> "$HAPROXY_CFG"
     echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-    # /engine/api/vX.Y/xxxx -> /engine/api/vAPI/xxxx
     echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
+    echo "  http-request set-var(tx.path_after) path if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
@@ -295,9 +277,7 @@ for service in $SERVICES; do
   fi
 done
 
-echo "" >> "$HAPROXY_CFG"
-# Debug : path final après éventuels rewrites
-echo "  http-request set-var(txn.path_after) path" >> "$HAPROXY_CFG"
+echo >> "$HAPROXY_CFG"
 echo "  default_backend docker-sock" >> "$HAPROXY_CFG"
 
 echo
