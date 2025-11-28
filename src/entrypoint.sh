@@ -102,7 +102,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # Capture Host pour voir l'alias dans les logs
+  # On log le Host (alias) pour voir quel service appelle quoi
   echo "  capture request header Host len 64"
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
@@ -158,7 +158,7 @@ for service in $SERVICES; do
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
-# 🔧: autoriser toujours /version (path_version), même sans Host
+# 🔧: autoriser toujours /version (path_version), même sans Host spécifique
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
   cond="path_version"
   for a in $ALLOWED_HOST_ACLS; do
@@ -177,7 +177,7 @@ for service in $SERVICES; do
   VERSION_FLAG=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
   EVENTS=$(get_flag "$service" "EVENTS")
-  # Compat: event/events
+  # Compat : event/events
   if [ "$EVENTS" -eq 0 ]; then
     EVENTS=$(get_flag "$service" "EVENT")
   fi
@@ -289,5 +289,10 @@ echo "Generated HAProxy configuration:"
 echo "--------------------------------"
 cat "$HAPROXY_CFG"
 echo "--------------------------------"
+
+# Vérif de la conf avant de lancer HAProxy (si erreur -> visible dans docker logs)
+echo "Checking HAProxy configuration..."
+haproxy -c -f "$HAPROXY_CFG"
+echo "HAProxy configuration OK, starting..."
 
 exec haproxy -W -db -f "$HAPROXY_CFG"
