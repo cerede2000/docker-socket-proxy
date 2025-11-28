@@ -73,7 +73,7 @@ get_flag() {
   esac
 }
 
-# Helper pour lire une valeur brute d'un service (ex: APIREWRITE=1.52)
+# Helper pour lire une valeur "brute" (ex: APIREWRITE=1.52)
 get_value() {
   service="$1"
   key="$2" # déjà UPPERCASE avec underscores
@@ -201,18 +201,18 @@ for service in $SERVICES; do
   TASKS=$(get_flag "$service" "TASKS")
   VOLUMES=$(get_flag "$service" "VOLUMES")
 
-  POST=$(get_flag("$service" "POST") 2>/dev/null || echo 0)
-  ALLOW_START=$(get_flag("$service" "ALLOW_START") 2>/dev/null || echo 0)
-  ALLOW_STOP=$(get_flag("$service" "ALLOW_STOP") 2>/dev/null || echo 0)
-  ALLOW_RESTARTS=$(get_flag("$service" "ALLOW_RESTARTS") 2>/dev/null || echo 0)
+  POST=$(get_flag "$service" "POST")
+  ALLOW_START=$(get_flag "$service" "ALLOW_START")
+  ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
+  ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
 
-  # Valeur brute pour apirewrite (ex: 1.51)
+  # Valeur brute pour apirewrite (ex: 1.52)
   APIREWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Réécriture de version d'API pour ce service
+  # Réécriture de version d'API pour ce service (ex: /v1.44/... -> /v1.52/...)
   if [ -n "$APIREWRITE" ]; then
     echo "  # API version rewrite for ${service} -> v${APIREWRITE}" >> "$HAPROXY_CFG"
     # /vX.Y/... -> /v${APIREWRITE}/...
