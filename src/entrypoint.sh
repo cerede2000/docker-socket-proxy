@@ -144,6 +144,7 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_cont_start   path_reg ^/(v[0-9.]+/)?containers/[^/]+/start\$"
   echo "  acl path_cont_stop    path_reg ^/(v[0-9.]+/)?containers/[^/]+/stop\$"
   echo "  acl path_cont_restart path_reg ^/(v[0-9.]+/)?containers/[^/]+/restart\$"
+  echo "  acl path_cont_exec    path_reg ^/(v[0-9.]+/)?containers/[^/]+/exec\$"
   echo "  acl path_distribution path_reg ^/(v[0-9.]+/)?distribution(/.*)?\$"
   echo "  acl path_exec         path_reg ^/(v[0-9.]+/)?exec(/.*)?\$"
   echo "  acl path_exec_root    path_reg ^/exec(/.*)?\$"
@@ -159,12 +160,12 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  acl path_tasks        path_reg ^/(v[0-9.]+/)?tasks(/.*)?\$"
   echo "  acl path_volumes      path_reg ^/(v[0-9.]+/)?volumes(/.*)?\$"
   echo
+  echo "  # Stick-table : contexte exec par IP (Portainer)"
+  echo "  stick-table type ip size 1k expire 30s store http_req_cnt"
+  echo "  acl has_exec_ctx sc0_http_req_cnt gt 0"
+  echo
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
-
-# Stick-table globale pour suivre le contexte exec (clé = IP source)
-echo "  stick-table type ip size 1k expire 30s store http_req_cnt" >> "$HAPROXY_CFG"
-echo "  acl has_exec_ctx sc0_http_req_cnt gt 0" >> "$HAPROXY_CFG"
 
 # ACL d’host par service + alias pour les logs + tracking exec pour proxy-portainer
 ALLOWED_HOST_ACLS=""
@@ -177,7 +178,8 @@ for service in $SERVICES; do
 
   # Suivi du contexte exec uniquement pour proxy-portainer
   if [ "$service" = "proxy-portainer" ]; then
-    echo "  http-request track-sc0 src if ${svc_acl} path_containers path_exec m_write" >> "$HAPROXY_CFG"
+    # On track la requête POST /vX.Y/containers/<id>/exec
+    echo "  http-request track-sc0 src if ${svc_acl} path_cont_exec m_write" >> "$HAPROXY_CFG"
   fi
 
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
@@ -185,7 +187,7 @@ done
 
 # Autoriser :
 #   - /version (pour healthcheck)
-#   - /exec/... (root) UNIQUEMENT si has_exec_ctx (donc exec préparé via proxy-portainer)
+#   - /exec/... (root) UNIQUEMENT si has_exec_ctx (exec préparé via proxy-portainer)
 #   - tout ce qui matche un alias de service
 if [ -n "$ALLOWED_HOST_ACLS" ]; then
   cond="path_version || path_exec_root has_exec_ctx"
@@ -239,13 +241,13 @@ for service in $SERVICES; do
     ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTART")
   fi
 
-  # lecture APIREWRITE brute (ex: 1.51) – utilisable si besoin pour des rewrites
+  # lecture APIREWRITE brute (ex: 1.51)
   API_REWRITE=$(get_value "$service" "APIREWRITE")
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # Si API_REWRITE défini -> rewrite global de la version d'API (optionnel)
+  # Si API_REWRITE défini -> rewrite global de la version d'API
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
     echo "  # API version rewrite for ${service} -> v${API_REWRITE} (ALL endpoints)" >> "$HAPROXY_CFG"
     echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
