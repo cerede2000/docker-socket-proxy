@@ -5,7 +5,8 @@ VERSION="${DOCKER_SOCKET_PROXY_VERSION:-main}"
 REVISION="${DOCKER_SOCKET_PROXY_REVISION:-dev}"
 SOCKET_PATH="${SOCKET_PATH:-/var/run/docker.sock}"
 PROXY_PORT="${PROXY_PORT:-2375}"
-HAPROXY_CFG="${HAPROXY_CFG:-/usr/local/etc/haproxy/haproxy.cfg}"
+# IMPORTANT : on écrit dans /tmp pour supporter read_only: true
+HAPROXY_CFG="${HAPROXY_CFG:-/tmp/haproxy.cfg}"
 
 echo " ==========================================="
 echo "  docker-socket-proxy"
@@ -237,7 +238,7 @@ for service in $SERVICES; do
     fi
     if [ "$ALLOW_STOP" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
-    fi
+    fi>
     if [ "$ALLOW_RESTARTS" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
     fi
