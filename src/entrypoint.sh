@@ -49,11 +49,7 @@ for arg in "$@"; do
 
       svc_var_key=$(svc_key "$service")
       flag_var_key=$(echo "$flag" | tr '[:lower:]' '[:upper:]' | tr '.-' '__')
-      # Exemple:
-      #  service=proxy-portainer, flag=apirewrite
-      #  -> svc_var_key=PROXY_PORTAINER
-      #  -> flag_var_key=APIREWRITE
-      #  -> variable = SERVICE_PROXY_PORTAINER_APIREWRITE
+      # Exemple: flag=apirewrite -> APIREWRITE
 
       # Ajoute à la liste des services si nouveau
       case " $SERVICES " in
@@ -106,8 +102,8 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  log global"
   echo "  mode http"
   echo "  option httplog"
-  # log-format : on log la méthode, le path, le Host et les vars de rewrite
-  echo "  log-format \"%ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Tt %ST %B %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %HM %HP host:%[req.hdr(host)] svc:%[var(tx.service)] path-before:%[var(tx.path_before)] path-after:%[var(tx.path_after)]\""
+  # Capture Host pour voir l'alias dans les logs
+  echo "  capture request header Host len 64"
   echo "  timeout connect 5s"
   echo "  timeout client  60s"
   echo "  timeout server  60s"
@@ -153,14 +149,12 @@ mkdir -p "$(dirname "$HAPROXY_CFG")"
   echo "  # ACL d'hôtes / aliases de services"
 } > "$HAPROXY_CFG"
 
-# ACL d’host par service + var(tx.service)
+# ACL d’host par service
 ALLOWED_HOST_ACLS=""
 for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
   echo "  acl ${svc_acl} hdr_reg(host) -i ^${service}(:[0-9]+)?\$" >> "$HAPROXY_CFG"
-  # on stocke le nom du service dans une var pour le log
-  echo "  http-request set-var(tx.service) str(${service}) if ${svc_acl}" >> "$HAPROXY_CFG"
   ALLOWED_HOST_ACLS="$ALLOWED_HOST_ACLS ${svc_acl}"
 done
 
@@ -178,10 +172,15 @@ for service in $SERVICES; do
   svc_var_key=$(svc_key "$service")
   svc_acl="svc_${svc_var_key}"
 
+  # Flags principaux
   PING=$(get_flag "$service" "PING")
-  VERSION=$(get_flag "$service" "VERSION")
+  VERSION_FLAG=$(get_flag "$service" "VERSION")
   INFO=$(get_flag "$service" "INFO")
   EVENTS=$(get_flag "$service" "EVENTS")
+  # Compat: event/events
+  if [ "$EVENTS" -eq 0 ]; then
+    EVENTS=$(get_flag "$service" "EVENT")
+  fi
   AUTH=$(get_flag "$service" "AUTH")
   BUILD=$(get_flag "$service" "BUILD")
   COMMIT=$(get_flag "$service" "COMMIT")
@@ -204,28 +203,33 @@ for service in $SERVICES; do
   POST=$(get_flag "$service" "POST")
   ALLOW_START=$(get_flag "$service" "ALLOW_START")
   ALLOW_STOP=$(get_flag "$service" "ALLOW_STOP")
-  ALLOW_RESTARTS=$(get_flag "$service" "ALLOW_RESTARTS")
+  # Compat: allow_restart / allow_restarts
+  AR1=$(get_flag "$service" "ALLOW_RESTART")
+  AR2=$(get_flag "$service" "ALLOW_RESTARTS")
+  if [ "$AR1" -eq 1 ] || [ "$AR2" -eq 1 ]; then
+    ALLOW_RESTART_FLAG=1
+  else
+    ALLOW_RESTART_FLAG=0
+  fi
 
-  # APIREWRITE est une **valeur** (ex : 1.51), pas un bool
+  # APIREWRITE = version string (ex: 1.51) ou vide
   api_rewrite_var="SERVICE_${svc_var_key}_APIREWRITE"
   eval "API_REWRITE=\${$api_rewrite_var-}"
 
   echo "" >> "$HAPROXY_CFG"
   echo "  # Règles pour le service ${service}" >> "$HAPROXY_CFG"
 
-  # 🔁 Rewrite d'API version uniquement pour ce service s'il a apirewrite
+  # 🔁 Rewrite d'API version uniquement pour ce service
   if [ -n "$API_REWRITE" ] && [ "$API_REWRITE" != "0" ]; then
     echo "  # API version rewrite for ${service} -> v${API_REWRITE}" >> "$HAPROXY_CFG"
-    echo "  http-request set-var(tx.path_before) path if ${svc_acl}" >> "$HAPROXY_CFG"
     echo "  http-request replace-path ^/v[0-9.]+(/.*)\$ /v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
     echo "  http-request replace-path ^/engine/api/v[0-9.]+(/.*)\$ /engine/api/v${API_REWRITE}\1 if ${svc_acl}" >> "$HAPROXY_CFG"
-    echo "  http-request set-var(tx.path_after) path if ${svc_acl}" >> "$HAPROXY_CFG"
   fi
 
   # Liste des chemins autorisés pour ce service
   allowed=""
   [ "$PING" -eq 1 ]          && allowed="$allowed path_ping"
-  [ "$VERSION" -eq 1 ]       && allowed="$allowed path_version"
+  [ "$VERSION_FLAG" -eq 1 ]  && allowed="$allowed path_version"
   [ "$INFO" -eq 1 ]          && allowed="$allowed path_info"
   [ "$EVENTS" -eq 1 ]        && allowed="$allowed path_events"
   [ "$AUTH" -eq 1 ]          && allowed="$allowed path_auth"
@@ -271,7 +275,7 @@ for service in $SERVICES; do
     if [ "$ALLOW_STOP" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_stop" >> "$HAPROXY_CFG"
     fi
-    if [ "$ALLOW_RESTARTS" -eq 0 ]; then
+    if [ "$ALLOW_RESTART_FLAG" -eq 0 ]; then
       echo "  http-request deny if ${svc_acl} m_write path_cont_restart" >> "$HAPROXY_CFG"
     fi
   fi
