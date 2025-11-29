@@ -13,11 +13,6 @@ ENV CGO_ENABLED=0 \
 
 WORKDIR /src
 
-# Optionnel mais recommandé si tu as un go.mod/go.sum
-# (sinon tu peux supprimer ces deux lignes et laisser le COPY . . plus bas)
-COPY go.mod go.sum ./
-RUN go mod download
-
 # Code source
 COPY . .
 
