@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -16,268 +17,123 @@ import (
 	"time"
 )
 
-// Profile describes the allowed Docker API surface for a logical service.
-type Profile struct {
+// ---------------------------------------------------------
+// Types de configuration
+// ---------------------------------------------------------
+
+type ServiceConfig struct {
 	Name string
 
-	// Read endpoints
-	Ping         bool
-	Version      bool
-	Info         bool
-	Events       bool
-	Auth         bool
-	Build        bool
-	Commit       bool
-	Configs      bool
-	Containers   bool
-	Distribution bool
-	Exec         bool
-	Images       bool
-	Networks     bool
-	Nodes        bool
-	Plugins      bool
-	Secrets      bool
-	Services     bool
-	Session      bool
-	Swarm        bool
-	System       bool
-	Tasks        bool
-	Volumes      bool
+	// Permissions Docker API
+	AllowPing         bool
+	AllowVersion      bool
+	AllowInfo         bool
+	AllowEvents       bool
+	AllowAuth         bool
+	AllowBuild        bool
+	AllowCommit       bool
+	AllowConfigs      bool
+	AllowContainers   bool
+	AllowDistribution bool
+	AllowExec         bool
+	AllowImages       bool
+	AllowNetworks     bool
+	AllowNodes        bool
+	AllowPlugins      bool
+	AllowSecrets      bool
+	AllowServices     bool
+	AllowSession      bool
+	AllowSwarm        bool
+	AllowSystem       bool
+	AllowTasks        bool
+	AllowVolumes      bool
 
-	// Write behaviour
-	Post         bool // allow POST/PUT/PATCH/DELETE on allowed endpoints
+	// Écriture
+	AllowPost    bool
 	AllowStart   bool
 	AllowStop    bool
 	AllowRestart bool
 
-	// Optional API version override (e.g. "1.51")
-	APIRewrite string
+	// Rewrite éventuelle de l’API Docker (/vX.Y/ -> /vAPIVERSION/)
+	APIVersionOverride string
 }
 
-// ContainerAccess describes which profile is attached to a given container IP.
-type ContainerAccess struct {
-	ContainerID string
-	Name        string
-	ProfileName string
+type ProxyConfig struct {
+	ListenAddr string
+	SocketPath string
+
+	Services map[string]*ServiceConfig
 }
 
-// AccessManager holds runtime mapping: IP -> profile, containerID -> IPs.
-type AccessManager struct {
-	mu      sync.RWMutex
-	ipToAcc map[string]ContainerAccess
-	idToIPs map[string][]string
+// Index IP → service (service = valeur du label socketproxy.service)
+type ClientIndex struct {
+	mu        sync.RWMutex
+	ipToSvc   map[string]string // "10.248.15.3" -> "proxy-home"
+	lastBuild time.Time
 }
 
-func NewAccessManager() *AccessManager {
-	return &AccessManager{
-		ipToAcc: make(map[string]ContainerAccess),
-		idToIPs: make(map[string][]string),
-	}
+func (ci *ClientIndex) Get(ip string) (string, bool) {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+	svc, ok := ci.ipToSvc[ip]
+	return svc, ok
 }
 
-func (am *AccessManager) UpdateContainer(containerID, name, profileName string, ips []string) {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	// Remove old IPs for this container
-	if oldIPs, ok := am.idToIPs[containerID]; ok {
-		for _, ip := range oldIPs {
-			delete(am.ipToAcc, ip)
-		}
-	}
-
-	// Insert new IPs
-	am.idToIPs[containerID] = ips
-	for _, ip := range ips {
-		am.ipToAcc[ip] = ContainerAccess{
-			ContainerID: containerID,
-			Name:        name,
-			ProfileName: profileName,
-		}
-	}
+func (ci *ClientIndex) Replace(newMap map[string]string) {
+	ci.mu.Lock()
+	defer ci.mu.Unlock()
+	ci.ipToSvc = newMap
+	ci.lastBuild = time.Now()
 }
 
-func (am *AccessManager) RemoveContainer(containerID string) {
-	am.mu.Lock()
-	defer am.mu.Unlock()
+// ---------------------------------------------------------
+// Structures Docker pour la découverte
+// ---------------------------------------------------------
 
-	if oldIPs, ok := am.idToIPs[containerID]; ok {
-		for _, ip := range oldIPs {
-			delete(am.ipToAcc, ip)
-		}
-		delete(am.idToIPs, containerID)
-	}
+type dockerContainerListItem struct {
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	Labels map[string]string `json:"Labels"`
 }
 
-func (am *AccessManager) FindByIP(ip string) (ContainerAccess, bool) {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	acc, ok := am.ipToAcc[ip]
-	return acc, ok
-}
-
-func (am *AccessManager) Stats() (containers int, ips int) {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return len(am.idToIPs), len(am.ipToAcc)
-}
-
-// DockerClient is an HTTP client speaking to the Docker Engine via unix socket.
-type DockerClient struct {
-	httpClient *http.Client
-}
-
-func NewDockerClient(socketPath string) *DockerClient {
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: 5 * time.Second}
-			return dialer.DialContext(ctx, "unix", socketPath)
-		},
-	}
-	return &DockerClient{
-		httpClient: &http.Client{
-			Transport: transport,
-			// No Timeout here: we control it via contexts per request
-		},
-	}
-}
-
-func (dc *DockerClient) do(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	u := &url.URL{
-		Scheme:   "http",
-		Host:     "docker", // ignored by unix dialer
-		Path:     path,
-		RawQuery: "",
-	}
-	if query != nil {
-		u.RawQuery = query.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if err != nil {
-		return nil, err
-	}
-	return dc.httpClient.Do(req)
-}
-
-func (dc *DockerClient) Ping(ctx context.Context) error {
-	resp, err := dc.do(ctx, http.MethodGet, "/version", nil, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("docker /version returned %s", resp.Status)
-	}
-	return nil
-}
-
-// ContainerListResponse is a minimal view of /containers/json.
-type ContainerListResponse struct {
-	ID              string            `json:"Id"`
-	Names           []string          `json:"Names"`
-	Labels          map[string]string `json:"Labels"`
-	NetworkSettings *struct {
-		Networks map[string]*struct {
-			IPAddress         string `json:"IPAddress"`
-			GlobalIPv6Address string `json:"GlobalIPv6Address"`
-		} `json:"Networks"`
-	} `json:"NetworkSettings"`
-}
-
-func (dc *DockerClient) ListContainers(ctx context.Context) ([]ContainerListResponse, error) {
-	q := url.Values{}
-	q.Set("all", "1")
-	resp, err := dc.do(ctx, http.MethodGet, "/containers/json", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("docker /containers/json: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	var out []ContainerListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// ContainerInspectResponse is a minimal view of /containers/{id}/json.
-type ContainerInspectResponse struct {
-	ID     string `json:"Id"`
-	Name   string `json:"Name"`
-	Config *struct {
+type dockerContainerInspect struct {
+	ID              string `json:"Id"`
+	Name            string `json:"Name"`
+	Config          struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
-	NetworkSettings *struct {
-		Networks map[string]*struct {
-			IPAddress         string `json:"IPAddress"`
-			GlobalIPv6Address string `json:"GlobalIPv6Address"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
 		} `json:"Networks"`
 	} `json:"NetworkSettings"`
 }
 
-func (dc *DockerClient) InspectContainer(ctx context.Context, id string) (*ContainerInspectResponse, error) {
-	path := "/containers/" + id + "/json"
-	resp, err := dc.do(ctx, http.MethodGet, path, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("docker %s: %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
-	}
-	var out ContainerInspectResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+// ---------------------------------------------------------
+// Proxy state
+// ---------------------------------------------------------
+
+type ProxyState struct {
+	cfg             *ProxyConfig
+	dockerClient    *http.Client
+	reverseProxy    *httputil.ReverseProxy
+	clients         *ClientIndex
+	allowedNetworks map[string]struct{} // réseaux du socket-proxy lui-même
 }
 
-// DockerEvent represents a single event from /events.
-type DockerEvent struct {
-	Type   string `json:"Type"`
-	Action string `json:"Action"`
-	Actor  struct {
-		ID         string            `json:"ID"`
-		Attributes map[string]string `json:"Attributes"`
-	} `json:"Actor"`
-	Time     int64 `json:"time"`
-	TimeNano int64 `json:"timeNano"`
+// ---------------------------------------------------------
+// Utilitaires
+// ---------------------------------------------------------
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
-func (dc *DockerClient) Events(ctx context.Context) (io.ReadCloser, error) {
-	q := url.Values{}
-	// Filter to container events only
-	filters := map[string][]string{
-		"type": {"container"},
-	}
-	filterJSON, _ := json.Marshal(filters)
-	q.Set("filters", string(filterJSON))
-
-	resp, err := dc.do(ctx, http.MethodGet, "/events", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return nil, fmt.Errorf("docker /events: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	return resp.Body, nil
-}
-
-// parseBool parses various truthy values ("1","true","yes","on").
-func parseBool(s string) bool {
-	s = strings.TrimSpace(strings.ToLower(s))
-	switch s {
+func parseBool(val string) bool {
+	switch strings.ToLower(strings.TrimSpace(val)) {
 	case "1", "true", "yes", "y", "on":
 		return true
 	default:
@@ -285,672 +141,884 @@ func parseBool(s string) bool {
 	}
 }
 
-// parseProfilesFromArgs parses CLI args like --proxy-homepage.containers=1.
-func parseProfilesFromArgs(args []string) map[string]*Profile {
-	profiles := make(map[string]*Profile)
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--proxy-") {
-			continue
-		}
-		trim := strings.TrimPrefix(arg, "--")
-		val := ""
-		if i := strings.IndexByte(trim, '='); i >= 0 {
-			val = trim[i+1:]
-			trim = trim[:i]
-		} else {
-			val = "1"
-		}
-		parts := strings.SplitN(trim, ".", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		profileName := parts[0] // e.g. "proxy-homepage"
-		flagName := parts[1]    // e.g. "containers"
-
-		p := profiles[profileName]
-		if p == nil {
-			p = &Profile{Name: profileName}
-			profiles[profileName] = p
-		}
-		setProfileFlag(p, flagName, val)
-	}
-	return profiles
-}
-
-func setProfileFlag(p *Profile, flagName, value string) {
-	key := strings.ToLower(flagName)
-
-	// Special case: API rewrite is a string version like "1.51"
-	if key == "apirewrite" || key == "api_rewrite" {
-		p.APIRewrite = strings.TrimSpace(value)
-		return
-	}
-
-	v := parseBool(value)
-
-	switch key {
-	case "ping":
-		p.Ping = v
-	case "version":
-		p.Version = v
-	case "info":
-		p.Info = v
-	case "events", "event":
-		p.Events = v
-	case "auth":
-		p.Auth = v
-	case "build":
-		p.Build = v
-	case "commit":
-		p.Commit = v
-	case "configs":
-		p.Configs = v
-	case "containers":
-		p.Containers = v
-	case "distribution":
-		p.Distribution = v
-	case "exec":
-		p.Exec = v
-	case "images":
-		p.Images = v
-	case "networks":
-		p.Networks = v
-	case "nodes":
-		p.Nodes = v
-	case "plugins":
-		p.Plugins = v
-	case "secrets":
-		p.Secrets = v
-	case "services":
-		p.Services = v
-	case "session":
-		p.Session = v
-	case "swarm":
-		p.Swarm = v
-	case "system":
-		p.System = v
-	case "tasks":
-		p.Tasks = v
-	case "volumes":
-		p.Volumes = v
-	case "post":
-		p.Post = v
-	case "allow_start":
-		p.AllowStart = v
-	case "allow_stop":
-		p.AllowStop = v
-	case "allow_restart", "allow_restarts":
-		p.AllowRestart = v
-	default:
-		// Unknown flag -> ignore
-	}
-}
-
-// ensureProfileForLabel returns a Profile for a given label, creating a "zero-rights"
-// profile if necessary. It also tries mapping "label" -> "proxy-label" if needed.
-func ensureProfileForLabel(label string, profiles map[string]*Profile) *Profile {
-	if label == "" {
-		return nil
-	}
-	if p, ok := profiles[label]; ok {
-		return p
-	}
-	if p, ok := profiles["proxy-"+label]; ok {
-		return p
-	}
-	// Unknown profile: create one with no rights
-	p := &Profile{Name: label}
-	profiles[label] = p
-	return p
-}
-
-// extractIPsFromNetworks returns all non-empty IPv4/IPv6 addresses from docker networks.
-func extractIPsFromNetworks(networks map[string]*struct {
-	IPAddress         string `json:"IPAddress"`
-	GlobalIPv6Address string `json:"GlobalIPv6Address"`
-}) []string {
-	var ips []string
-	for name, n := range networks {
-		_ = name // not used, but may be helpful for debug later
-		if n == nil {
-			continue
-		}
-		if ip := strings.TrimSpace(n.IPAddress); ip != "" {
-			ips = append(ips, ip)
-		}
-		if ip6 := strings.TrimSpace(n.GlobalIPv6Address); ip6 != "" {
-			ips = append(ips, ip6)
-		}
-	}
-	return ips
-}
-
-// normalizeRemoteIP converts IPv6-mapped IPv4 (::ffff:a.b.c.d) to plain a.b.c.d.
-func normalizeRemoteIP(remote string) string {
-	host := remote
-	if strings.Contains(remote, ":") {
-		// remote is usually "IP:port"
-		if h, _, err := net.SplitHostPort(remote); err == nil {
-			host = h
-		}
-	}
-	ip := net.ParseIP(host)
+func normalizeIPv4(ipStr string) string {
+	ipStr = strings.TrimSpace(ipStr)
+	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		return host
+		return ipStr
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
 	}
 	return ip.String()
 }
 
-// analyzePath decomposes the Docker HTTP path into endpoint, action and version info.
-func analyzePath(path string) (endpoint string, action string, hasVersion bool, versionIndex int, segments []string) {
-	versionIndex = -1
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return "", "", false, -1, nil
+func shortID(id string) string {
+	if len(id) >= 12 {
+		return id[:12]
 	}
-	segments = strings.Split(trimmed, "/")
-	mainIdx := 0
-	if len(segments) > 1 && strings.HasPrefix(segments[0], "v") {
-		hasVersion = true
-		versionIndex = 0
-		mainIdx = 1
-	}
-	main := segments[mainIdx]
-
-	// Determine action for some endpoints
-	switch main {
-	case "containers":
-		// pattern: containers/{id}/{action}
-		if len(segments) > mainIdx+2 {
-			action = segments[mainIdx+2]
-		}
-	case "exec":
-		// pattern: exec/{id}/{action}
-		if len(segments) > mainIdx+2 {
-			action = segments[mainIdx+2]
-		}
-	default:
-		action = ""
-	}
-
-	// Map main to logical endpoint
-	switch main {
-	case "_ping":
-		endpoint = "ping"
-	case "version":
-		endpoint = "version"
-	case "info":
-		endpoint = "info"
-	case "events":
-		endpoint = "events"
-	case "auth":
-		endpoint = "auth"
-	case "build":
-		endpoint = "build"
-	case "commit":
-		endpoint = "commit"
-	case "configs":
-		endpoint = "configs"
-	case "containers":
-		endpoint = "containers"
-	case "distribution":
-		endpoint = "distribution"
-	case "exec":
-		endpoint = "exec"
-	case "images":
-		endpoint = "images"
-	case "networks":
-		endpoint = "networks"
-	case "nodes":
-		endpoint = "nodes"
-	case "plugins":
-		endpoint = "plugins"
-	case "secrets":
-		endpoint = "secrets"
-	case "services":
-		endpoint = "services"
-	case "session":
-		endpoint = "session"
-	case "swarm":
-		endpoint = "swarm"
-	case "system":
-		endpoint = "system"
-	case "tasks":
-		endpoint = "tasks"
-	case "volumes":
-		endpoint = "volumes"
-	default:
-		endpoint = ""
-	}
-
-	return endpoint, action, hasVersion, versionIndex, segments
+	return id
 }
 
-func isMethodSafe(method string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return true
-	default:
-		return false
+// ---------------------------------------------------------
+// Parsing des arguments --proxy-xxx
+// ---------------------------------------------------------
+
+func parseConfigFromArgs() *ProxyConfig {
+	cfg := &ProxyConfig{
+		ListenAddr: envOrDefault("LISTEN_ADDR", ":2375"),
+		SocketPath: envOrDefault("DOCKER_SOCKET_PATH", "/var/run/docker.sock"),
+		Services:   make(map[string]*ServiceConfig),
+	}
+
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--listen=") {
+			cfg.ListenAddr = strings.TrimPrefix(arg, "--listen=")
+			continue
+		}
+		if strings.HasPrefix(arg, "--socket-path=") {
+			cfg.SocketPath = strings.TrimPrefix(arg, "--socket-path=")
+			continue
+		}
+
+		if !strings.HasPrefix(arg, "--proxy-") {
+			continue
+		}
+
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		trim := strings.TrimPrefix(arg, "--")
+		nameVal := strings.SplitN(trim, "=", 2)
+		key := nameVal[0] // ex: proxy-home.containers
+		val := "1"
+		if len(nameVal) == 2 {
+			val = nameVal[1]
+		}
+
+		parts := strings.SplitN(key, ".", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		svcName := parts[0]  // ex: proxy-home
+		flagName := parts[1] // ex: containers
+		flagKey := strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+
+		svc := cfg.Services[svcName]
+		if svc == nil {
+			svc = &ServiceConfig{Name: svcName}
+			cfg.Services[svcName] = svc
+		}
+
+		// Flags logiques
+		switch flagKey {
+		case "PING":
+			svc.AllowPing = parseBool(val)
+		case "VERSION":
+			svc.AllowVersion = parseBool(val)
+		case "INFO":
+			svc.AllowInfo = parseBool(val)
+		case "EVENTS", "EVENT":
+			svc.AllowEvents = parseBool(val)
+		case "AUTH":
+			svc.AllowAuth = parseBool(val)
+		case "BUILD":
+			svc.AllowBuild = parseBool(val)
+		case "COMMIT":
+			svc.AllowCommit = parseBool(val)
+		case "CONFIGS":
+			svc.AllowConfigs = parseBool(val)
+		case "CONTAINERS":
+			svc.AllowContainers = parseBool(val)
+		case "DISTRIBUTION":
+			svc.AllowDistribution = parseBool(val)
+		case "EXEC":
+			svc.AllowExec = parseBool(val)
+		case "IMAGES":
+			svc.AllowImages = parseBool(val)
+		case "NETWORKS":
+			svc.AllowNetworks = parseBool(val)
+		case "NODES":
+			svc.AllowNodes = parseBool(val)
+		case "PLUGINS":
+			svc.AllowPlugins = parseBool(val)
+		case "SECRETS":
+			svc.AllowSecrets = parseBool(val)
+		case "SERVICES":
+			svc.AllowServices = parseBool(val)
+		case "SESSION":
+			svc.AllowSession = parseBool(val)
+		case "SWARM":
+			svc.AllowSwarm = parseBool(val)
+		case "SYSTEM":
+			svc.AllowSystem = parseBool(val)
+		case "TASKS":
+			svc.AllowTasks = parseBool(val)
+		case "VOLUMES":
+			svc.AllowVolumes = parseBool(val)
+		case "POST":
+			svc.AllowPost = parseBool(val)
+		case "ALLOW_START":
+			svc.AllowStart = parseBool(val)
+		case "ALLOW_STOP":
+			svc.AllowStop = parseBool(val)
+		case "ALLOW_RESTARTS", "ALLOW_RESTART":
+			svc.AllowRestart = parseBool(val)
+		case "APIREWRITE":
+			// ex: --proxy-portainer.apirewrite=1.51
+			svc.APIVersionOverride = strings.TrimSpace(val)
+		default:
+			log.Printf("[config] Unknown flag for service %s: %s=%s", svcName, flagKey, val)
+		}
+	}
+
+	log.Printf("[config] listen=%s socket=%s", cfg.ListenAddr, cfg.SocketPath)
+	for name, s := range cfg.Services {
+		log.Printf("[config] service=%s (ping=%v version=%v info=%v containers=%v exec=%v images=%v networks=%v post=%v start=%v stop=%v restart=%v apirewrite=%q)",
+			name,
+			s.AllowPing, s.AllowVersion, s.AllowInfo, s.AllowContainers, s.AllowExec,
+			s.AllowImages, s.AllowNetworks,
+			s.AllowPost, s.AllowStart, s.AllowStop, s.AllowRestart,
+			s.APIVersionOverride,
+		)
+	}
+
+	return cfg
+}
+
+// ---------------------------------------------------------
+// Docker client (Unix socket)
+// ---------------------------------------------------------
+
+func newDockerHTTPClient(socketPath string) *http.Client {
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
+		},
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second, // pour les appels "contrôle" (pas exec attach)
 	}
 }
 
-// isAllowed checks whether a given profile is allowed to call an endpoint/action with a given method.
-func isAllowed(p *Profile, method, endpoint, action string) bool {
-	if p == nil {
-		return false
+// ---------------------------------------------------------
+// Découverte des réseaux du socket-proxy lui-même
+// ---------------------------------------------------------
+
+func detectSelfContainerCandidates() []string {
+	var candidates []string
+
+	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
+		candidates = append(candidates, strings.TrimSpace(h))
 	}
 
-	// Determine if endpoint is allowed at all
-	allowedRead := false
-	switch endpoint {
-	case "ping":
-		allowedRead = p.Ping
-	case "version":
-		allowedRead = p.Version
-	case "info":
-		allowedRead = p.Info
-	case "events":
-		allowedRead = p.Events
-	case "auth":
-		allowedRead = p.Auth
-	case "build":
-		allowedRead = p.Build
-	case "commit":
-		allowedRead = p.Commit
-	case "configs":
-		allowedRead = p.Configs
-	case "containers":
-		allowedRead = p.Containers
-	case "distribution":
-		allowedRead = p.Distribution
-	case "exec":
-		allowedRead = p.Exec
-	case "images":
-		allowedRead = p.Images
-	case "networks":
-		allowedRead = p.Networks
-	case "nodes":
-		allowedRead = p.Nodes
-	case "plugins":
-		allowedRead = p.Plugins
-	case "secrets":
-		allowedRead = p.Secrets
-	case "services":
-		allowedRead = p.Services
-	case "session":
-		allowedRead = p.Session
-	case "swarm":
-		allowedRead = p.Swarm
-	case "system":
-		allowedRead = p.System
-	case "tasks":
-		allowedRead = p.Tasks
-	case "volumes":
-		allowedRead = p.Volumes
-	default:
-		allowedRead = false
-	}
-	if !allowedRead {
-		return false
-	}
-
-	if isMethodSafe(method) {
-		// GET/HEAD/OPTIONS
-		return true
-	}
-
-	// Write methods: require POST permission
-	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-		if !p.Post {
-			return false
-		}
-	default:
-		// Unknown method -> deny
-		return false
-	}
-
-	// Additional restrictions for some endpoints/actions
-	if endpoint == "containers" {
-		switch action {
-		case "start":
-			return p.AllowStart
-		case "stop":
-			return p.AllowStop
-		case "restart":
-			return p.AllowRestart
+	// Fallback via /proc/self/cgroup (Docker, containerd, etc.)
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			parts := strings.Split(line, ":")
+			if len(parts) != 3 {
+				continue
+			}
+			path := parts[2]
+			if idx := strings.LastIndex(path, "/"); idx >= 0 && idx+1 < len(path) {
+				id := strings.TrimSpace(path[idx+1:])
+				if id != "" {
+					candidates = append(candidates, id)
+				}
+			}
 		}
 	}
 
-	// For exec and others, Post + endpoint flag is enough
-	return true
+	// déduplication
+	uniq := make(map[string]struct{})
+	var out []string
+	for _, c := range candidates {
+		if _, ok := uniq[c]; !ok {
+			uniq[c] = struct{}{}
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
-// initialDiscovery scans all containers and fills the AccessManager based on labels.
-func initialDiscovery(ctx context.Context, dc *DockerClient, am *AccessManager, profiles map[string]*Profile, labelKey string) error {
-	log.Printf("[discover] starting initial discovery")
-	containers, err := dc.ListContainers(ctx)
+func discoverSelfNetworks(ctx context.Context, dockerClient *http.Client) (map[string]struct{}, error) {
+	cands := detectSelfContainerCandidates()
+	if len(cands) == 0 {
+		return nil, errors.New("no self container candidates")
+	}
+
+	var lastErr error
+	for _, id := range cands {
+		urlStr := fmt.Sprintf("http://docker/containers/%s/json", id)
+		req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := dockerClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("status=%d body=%s", resp.StatusCode, string(body))
+			continue
+		}
+
+		var ins dockerContainerInspect
+		if err := json.NewDecoder(resp.Body).Decode(&ins); err != nil {
+			_ = resp.Body.Close()
+			lastErr = err
+			continue
+		}
+		_ = resp.Body.Close()
+
+		nets := make(map[string]struct{})
+		for netName := range ins.NetworkSettings.Networks {
+			nets[netName] = struct{}{}
+		}
+
+		if len(nets) == 0 {
+			lastErr = fmt.Errorf("no networks found on self container %s", id)
+			continue
+		}
+
+		log.Printf("[self] detected container=%s name=%s networks=%v", shortID(ins.ID), ins.Name, keysOfSet(nets))
+		return nets, nil
+	}
+
+	return nil, fmt.Errorf("discoverSelfNetworks failed, lastErr=%v", lastErr)
+}
+
+func keysOfSet(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// ---------------------------------------------------------
+// Découverte des conteneurs avec label socketproxy.service
+// ---------------------------------------------------------
+
+func (ps *ProxyState) discoverClients(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://docker/containers/json?all=true", nil)
 	if err != nil {
 		return err
 	}
-	for _, c := range containers {
-		if c.Labels == nil {
-			continue
-		}
-		labelVal := strings.TrimSpace(c.Labels[labelKey])
-		if labelVal == "" {
-			continue
-		}
-		profile := ensureProfileForLabel(labelVal, profiles)
-		if profile == nil {
-			continue
-		}
-		if c.NetworkSettings == nil || len(c.NetworkSettings.Networks) == 0 {
-			continue
-		}
-		ips := extractIPsFromNetworks(c.NetworkSettings.Networks)
-		if len(ips) == 0 {
-			continue
-		}
-		name := ""
-		if len(c.Names) > 0 {
-			name = strings.TrimPrefix(c.Names[0], "/")
-		}
-		shortID := c.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
-		am.UpdateContainer(c.ID, name, profile.Name, ips)
-		log.Printf("[discover] container=%s id=%s profile=%s ips=%v", name, shortID, profile.Name, ips)
+
+	resp, err := ps.dockerClient.Do(req)
+	if err != nil {
+		return err
 	}
-	containersCount, ipsCount := am.Stats()
-	log.Printf("[discover] completed: containers=%d ips=%d", containersCount, ipsCount)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("docker /containers/json status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var list []dockerContainerListItem
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return fmt.Errorf("decode containers/json: %w", err)
+	}
+
+	newMap := make(map[string]string)
+
+	for _, c := range list {
+		svcName, ok := c.Labels["socketproxy.service"]
+		if !ok || strings.TrimSpace(svcName) == "" {
+			continue
+		}
+
+		// On ne garde que si le service est connu (configuré via --proxy-...)
+		if _, exists := ps.cfg.Services[svcName]; !exists {
+			log.Printf("[discover] container=%s has socketproxy.service=%q but no matching service in config; ignoring",
+				shortID(c.ID), svcName)
+			continue
+		}
+
+		if err := ps.addIPsFromInspect(ctx, newMap, c.ID, svcName); err != nil {
+			log.Printf("[discover] inspect error for %s (service=%s): %v", shortID(c.ID), svcName, err)
+			continue
+		}
+	}
+
+	ps.clients.Replace(newMap)
+	log.Printf("[discover] index built with %d IP(s)", len(newMap))
 	return nil
 }
 
-// watchEvents keeps the AccessManager in sync with Docker container events.
-func watchEvents(ctx context.Context, dc *DockerClient, am *AccessManager, profiles map[string]*Profile, labelKey string) {
-	backoff := time.Second
+func (ps *ProxyState) addIPsFromInspect(ctx context.Context, ipMap map[string]string, containerID, svcName string) error {
+	urlStr := fmt.Sprintf("http://docker/containers/%s/json", containerID)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := ps.dockerClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("[events] context cancelled, stopping events watcher")
-			return
-		default:
-		}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("inspect status=%d body=%s", resp.StatusCode, string(body))
+	}
 
-		log.Printf("[events] connecting to Docker /events")
-		body, err := dc.Events(ctx)
-		if err != nil {
-			log.Printf("[events] error opening events stream: %v", err)
-			time.Sleep(backoff)
-			continue
-		}
+	var ins dockerContainerInspect
+	if err := json.NewDecoder(resp.Body).Decode(&ins); err != nil {
+		return fmt.Errorf("decode inspect: %w", err)
+	}
 
-		dec := json.NewDecoder(body)
-		for {
-			var evt DockerEvent
-			if err := dec.Decode(&evt); err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
-					log.Printf("[events] stream ended: %v", err)
-					break
-				}
-				log.Printf("[events] decode error: %v", err)
-				break
-			}
+	name := strings.TrimPrefix(ins.Name, "/")
+	if name == "" && len(ins.Config.Labels["com.docker.compose.service"]) > 0 {
+		name = ins.Config.Labels["com.docker.compose.service"]
+	}
 
-			if evt.Type != "container" {
+	for netName, netData := range ins.NetworkSettings.Networks {
+		// 🔒 Filtrage : on ne garde que les réseaux du socket-proxy lui-même
+		if len(ps.allowedNetworks) > 0 {
+			if _, ok := ps.allowedNetworks[netName]; !ok {
 				continue
 			}
-
-			containerID := evt.Actor.ID
-			action := evt.Action
-
-			switch action {
-			case "start":
-				// Inspect container and (re)register IPs
-				go func(id string) {
-					ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-
-					ins, err := dc.InspectContainer(ctx2, id)
-					if err != nil {
-						log.Printf("[events] inspect error for %s: %v", id, err)
-						return
-					}
-					if ins.Config == nil || ins.Config.Labels == nil {
-						return
-					}
-					labelVal := strings.TrimSpace(ins.Config.Labels[labelKey])
-					if labelVal == "" {
-						return
-					}
-					profile := ensureProfileForLabel(labelVal, profiles)
-					if profile == nil {
-						return
-					}
-					if ins.NetworkSettings == nil || len(ins.NetworkSettings.Networks) == 0 {
-						return
-					}
-					ips := extractIPsFromNetworks(ins.NetworkSettings.Networks)
-					if len(ips) == 0 {
-						return
-					}
-					name := strings.TrimPrefix(ins.Name, "/")
-					shortID := id
-					if len(shortID) > 12 {
-						shortID = shortID[:12]
-					}
-					am.UpdateContainer(id, name, profile.Name, ips)
-					log.Printf("[events] start: container=%s id=%s profile=%s ips=%v", name, shortID, profile.Name, ips)
-				}(containerID)
-
-			case "die", "stop", "destroy":
-				am.RemoveContainer(containerID)
-				shortID := containerID
-				if len(shortID) > 12 {
-					shortID = shortID[:12]
-				}
-				name := evt.Actor.Attributes["name"]
-				log.Printf("[events] %s: container=%s id=%s", action, name, shortID)
-
-			default:
-				// ignore other actions
-			}
 		}
 
-		body.Close()
-		log.Printf("[events] reconnecting to Docker /events after backoff")
-		time.Sleep(backoff)
-	}
-}
-
-// ProxyServer holds the HTTP handlers state.
-type ProxyServer struct {
-	docker   *DockerClient
-	access   *AccessManager
-	profiles map[string]*Profile
-	labelKey string
-}
-
-func (ps *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	if err := ps.docker.Ping(ctx); err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprintf(w, "docker unreachable: %v\n", err)
-		return
-	}
-	containers, ips := ps.access.Stats()
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "ok containers=%d ips=%d\n", containers, ips)
-}
-
-func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-
-	clientIP := normalizeRemoteIP(r.RemoteAddr)
-	acc, ok := ps.access.FindByIP(clientIP)
-	var profile *Profile
-	var profileName, containerName string
-	if ok {
-		profileName = acc.ProfileName
-		containerName = acc.Name
-		profile = ps.profiles[profileName]
-	} else {
-		profileName = "-"
-		containerName = "-"
-	}
-
-	origPath := r.URL.Path
-	endpoint, action, hasVersion, versionIdx, segments := analyzePath(origPath)
-
-	if profile == nil {
-		log.Printf("[deny] ip=%s profile=none container=%s method=%s path=%s endpoint=%s action=%s", clientIP, containerName, r.Method, origPath, endpoint, action)
-		http.Error(w, "Forbidden: unknown client", http.StatusForbidden)
-		return
-	}
-
-	if endpoint == "" {
-		log.Printf("[deny] ip=%s profile=%s container=%s method=%s path=%s reason=no-endpoint", clientIP, profileName, containerName, r.Method, origPath)
-		http.Error(w, "Forbidden: unsupported path", http.StatusForbidden)
-		return
-	}
-
-	if !isAllowed(profile, r.Method, endpoint, action) {
-		log.Printf("[deny] ip=%s profile=%s container=%s method=%s path=%s endpoint=%s action=%s", clientIP, profileName, containerName, r.Method, origPath, endpoint, action)
-		http.Error(w, "Forbidden by socket-proxy ACL", http.StatusForbidden)
-		return
-	}
-
-	// Optional API version rewrite (e.g., v1.44 -> v1.51)
-	finalPath := origPath
-	if profile.APIRewrite != "" && hasVersion && versionIdx >= 0 && len(segments) > versionIdx {
-		segments[versionIdx] = "v" + profile.APIRewrite
-		finalPath = "/" + strings.Join(segments, "/")
-	}
-
-	// Build upstream request to Docker
-	upstreamURL := &url.URL{
-		Scheme:   "http",
-		Host:     "docker",
-		Path:     finalPath,
-		RawQuery: r.URL.RawQuery,
-	}
-	reqUp, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL.String(), r.Body)
-	if err != nil {
-		log.Printf("[error] building upstream request: %v", err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
-	// Copy headers (except hop-by-hop)
-	for k, vals := range r.Header {
-		if strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Keep-Alive") ||
-			strings.EqualFold(k, "Proxy-Authenticate") || strings.EqualFold(k, "Proxy-Authorization") ||
-			strings.EqualFold(k, "Te") || strings.EqualFold(k, "Trailers") ||
-			strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Upgrade") {
+		ip := strings.TrimSpace(netData.IPAddress)
+		if ip == "" {
 			continue
 		}
-		for _, v := range vals {
-			reqUp.Header.Add(k, v)
-		}
+		normIP := normalizeIPv4(ip)
+		ipMap[normIP] = svcName
+		log.Printf("[discover] service=%s container=%s network=%s ip=%s",
+			svcName, name, netName, normIP)
 	}
 
-	respUp, err := ps.docker.httpClient.Do(reqUp)
-	if err != nil {
-		log.Printf("[error] upstream docker call failed: %v", err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
-	defer respUp.Body.Close()
-
-	// Copy response headers/status/body
-	for k, vals := range respUp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(respUp.StatusCode)
-	if _, err := io.Copy(w, respUp.Body); err != nil {
-		log.Printf("[warn] error copying upstream response body: %v", err)
-	}
-
-	elapsed := time.Since(start)
-	log.Printf("[allow] ip=%s profile=%s container=%s method=%s path=%s -> %s endpoint=%s action=%s status=%d duration=%s",
-		clientIP, profileName, containerName, r.Method, origPath, finalPath, endpoint, action, respUp.StatusCode, elapsed)
+	return nil
 }
 
-func main() {
-	log.Printf("=== docker-socket-proxy (Go) starting ===")
+// ---------------------------------------------------------
+// Santé / healthcheck
+// ---------------------------------------------------------
 
-	socketPath := os.Getenv("DOCKER_SOCKET_PATH")
-	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
+func isLocalRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// cas improbable, on compare brut
+		host = remoteAddr
 	}
-	proxyPort := os.Getenv("PROXY_PORT")
-	if proxyPort == "" {
-		proxyPort = "2375"
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "::ffff:")
+
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+func (ps *ProxyState) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://docker/version", nil)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 
-	profiles := parseProfilesFromArgs(os.Args[1:])
-	if len(profiles) == 0 {
-		log.Printf("[warn] no --proxy-*.flags provided: all clients will be denied unless profiles are discovered dynamically")
+	resp, err := ps.dockerClient.Do(req)
+	if err != nil {
+		http.Error(w, "docker unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "docker /version not OK", http.StatusServiceUnavailable)
+		return
 	}
 
-	labelKey := "socketproxy.service"
+	// On renvoie le JSON docker /version (compatible ancien health)
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("[health] copy body error: %v", err)
+	}
+}
 
-	dc := NewDockerClient(socketPath)
+// ---------------------------------------------------------
+// Classification des paths / ACL
+// ---------------------------------------------------------
 
+type endpointGroup string
+
+const (
+	groupUnknown      endpointGroup = ""
+	groupPing         endpointGroup = "ping"
+	groupVersion      endpointGroup = "version"
+	groupInfo         endpointGroup = "info"
+	groupEvents       endpointGroup = "events"
+	groupAuth         endpointGroup = "auth"
+	groupBuild        endpointGroup = "build"
+	groupCommit       endpointGroup = "commit"
+	groupConfigs      endpointGroup = "configs"
+	groupContainers   endpointGroup = "containers"
+	groupDistribution endpointGroup = "distribution"
+	groupExec         endpointGroup = "exec"
+	groupImages       endpointGroup = "images"
+	groupNetworks     endpointGroup = "networks"
+	groupNodes        endpointGroup = "nodes"
+	groupPlugins      endpointGroup = "plugins"
+	groupSecrets      endpointGroup = "secrets"
+	groupServices     endpointGroup = "services"
+	groupSession      endpointGroup = "session"
+	groupSwarm        endpointGroup = "swarm"
+	groupSystem       endpointGroup = "system"
+	groupTasks        endpointGroup = "tasks"
+	groupVolumes      endpointGroup = "volumes"
+)
+
+type pathInfo struct {
+	Group     endpointGroup
+	IsStart   bool
+	IsStop    bool
+	IsRestart bool
+	IsExec    bool // pour bien marquer les /containers/.../exec ou /exec/...
+}
+
+func stripAPIVersion(p string) string {
+	if !strings.HasPrefix(p, "/v") {
+		return p
+	}
+	// format attendu: /v[digits].[digits]/...
+	// on cherche le prochain '/'
+	dotSeen := false
+	for i := 2; i < len(p); i++ {
+		ch := p[i]
+		if ch == '/' {
+			if dotSeen {
+				return p[i:]
+			}
+			return p
+		}
+		if ch == '.' {
+			dotSeen = true
+		} else if ch < '0' || ch > '9' {
+			return p
+		}
+	}
+	return p
+}
+
+func classifyPath(path string) pathInfo {
+	res := pathInfo{Group: groupUnknown}
+
+	trim := stripAPIVersion(path)
+
+	// on ignore les query pour la classification
+	if idx := strings.Index(trim, "?"); idx >= 0 {
+		trim = trim[:idx]
+	}
+
+	if trim == "/_ping" {
+		res.Group = groupPing
+		return res
+	}
+	if trim == "/version" {
+		res.Group = groupVersion
+		return res
+	}
+	if trim == "/info" {
+		res.Group = groupInfo
+		return res
+	}
+
+	switch {
+	case strings.HasPrefix(trim, "/events"):
+		res.Group = groupEvents
+	case strings.HasPrefix(trim, "/auth"):
+		res.Group = groupAuth
+	case strings.HasPrefix(trim, "/build"):
+		res.Group = groupBuild
+	case strings.HasPrefix(trim, "/commit"):
+		res.Group = groupCommit
+	case strings.HasPrefix(trim, "/configs"):
+		res.Group = groupConfigs
+	case strings.HasPrefix(trim, "/containers"):
+		res.Group = groupContainers
+		if strings.Contains(trim, "/exec") {
+			res.Group = groupExec
+			res.IsExec = true
+		}
+		if strings.HasSuffix(trim, "/start") {
+			res.IsStart = true
+		} else if strings.HasSuffix(trim, "/stop") {
+			res.IsStop = true
+		} else if strings.HasSuffix(trim, "/restart") {
+			res.IsRestart = true
+		}
+	case strings.HasPrefix(trim, "/distribution"):
+		res.Group = groupDistribution
+	case strings.HasPrefix(trim, "/exec"):
+		res.Group = groupExec
+		res.IsExec = true
+	case strings.HasPrefix(trim, "/images"):
+		res.Group = groupImages
+	case strings.HasPrefix(trim, "/networks"):
+		res.Group = groupNetworks
+	case strings.HasPrefix(trim, "/nodes"):
+		res.Group = groupNodes
+	case strings.HasPrefix(trim, "/plugins"):
+		res.Group = groupPlugins
+	case strings.HasPrefix(trim, "/secrets"):
+		res.Group = groupSecrets
+	case strings.HasPrefix(trim, "/services"):
+		res.Group = groupServices
+	case strings.HasPrefix(trim, "/session"):
+		res.Group = groupSession
+	case strings.HasPrefix(trim, "/swarm"):
+		res.Group = groupSwarm
+	case strings.HasPrefix(trim, "/system"):
+		res.Group = groupSystem
+	case strings.HasPrefix(trim, "/tasks"):
+		res.Group = groupTasks
+	case strings.HasPrefix(trim, "/volumes"):
+		res.Group = groupVolumes
+	default:
+		res.Group = groupUnknown
+	}
+
+	return res
+}
+
+func checkACL(svc *ServiceConfig, pi pathInfo, method string) error {
+	isWrite := method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+
+	// Lecture seule ?
+	if !isWrite {
+		switch pi.Group {
+		case groupPing:
+			if !svc.AllowPing {
+				return errors.New("ping not allowed")
+			}
+		case groupVersion:
+			if !svc.AllowVersion {
+				return errors.New("version not allowed")
+			}
+		case groupInfo:
+			if !svc.AllowInfo {
+				return errors.New("info not allowed")
+			}
+		case groupEvents:
+			if !svc.AllowEvents {
+				return errors.New("events not allowed")
+			}
+		case groupAuth:
+			if !svc.AllowAuth {
+				return errors.New("auth not allowed")
+			}
+		case groupBuild:
+			if !svc.AllowBuild {
+				return errors.New("build not allowed")
+			}
+		case groupCommit:
+			if !svc.AllowCommit {
+				return errors.New("commit not allowed")
+			}
+		case groupConfigs:
+			if !svc.AllowConfigs {
+				return errors.New("configs not allowed")
+			}
+		case groupContainers:
+			if !svc.AllowContainers {
+				return errors.New("containers not allowed")
+			}
+		case groupDistribution:
+			if !svc.AllowDistribution {
+				return errors.New("distribution not allowed")
+			}
+		case groupExec:
+			if !svc.AllowExec {
+				return errors.New("exec not allowed")
+			}
+		case groupImages:
+			if !svc.AllowImages {
+				return errors.New("images not allowed")
+			}
+		case groupNetworks:
+			if !svc.AllowNetworks {
+				return errors.New("networks not allowed")
+			}
+		case groupNodes:
+			if !svc.AllowNodes {
+				return errors.New("nodes not allowed")
+			}
+		case groupPlugins:
+			if !svc.AllowPlugins {
+				return errors.New("plugins not allowed")
+			}
+		case groupSecrets:
+			if !svc.AllowSecrets {
+				return errors.New("secrets not allowed")
+			}
+		case groupServices:
+			if !svc.AllowServices {
+				return errors.New("services not allowed")
+			}
+		case groupSession:
+			if !svc.AllowSession {
+				return errors.New("session not allowed")
+			}
+		case groupSwarm:
+			if !svc.AllowSwarm {
+				return errors.New("swarm not allowed")
+			}
+		case groupSystem:
+			if !svc.AllowSystem {
+				return errors.New("system not allowed")
+			}
+		case groupTasks:
+			if !svc.AllowTasks {
+				return errors.New("tasks not allowed")
+			}
+		case groupVolumes:
+			if !svc.AllowVolumes {
+				return errors.New("volumes not allowed")
+			}
+		case groupUnknown:
+			return errors.New("unknown path group")
+		}
+		return nil
+	}
+
+	// Écriture
+	if !svc.AllowPost {
+		return errors.New("write methods not allowed (POST/PUT/PATCH/DELETE)")
+	}
+
+	// Start/Stop/Restart
+	if pi.IsStart && !svc.AllowStart {
+		return errors.New("container start not allowed")
+	}
+	if pi.IsStop && !svc.AllowStop {
+		return errors.New("container stop not allowed")
+	}
+	if pi.IsRestart && !svc.AllowRestart {
+		return errors.New("container restart not allowed")
+	}
+
+	switch pi.Group {
+	case groupExec:
+		if !svc.AllowExec {
+			return errors.New("exec write not allowed")
+		}
+	case groupContainers:
+		if !svc.AllowContainers {
+			return errors.New("containers write not allowed")
+		}
+	case groupImages:
+		if !svc.AllowImages {
+			return errors.New("images write not allowed")
+		}
+	case groupNetworks:
+		if !svc.AllowNetworks {
+			return errors.New("networks write not allowed")
+		}
+	case groupServices:
+		if !svc.AllowServices {
+			return errors.New("services write not allowed")
+		}
+	case groupVolumes:
+		if !svc.AllowVolumes {
+			return errors.New("volumes write not allowed")
+		}
+	case groupBuild:
+		if !svc.AllowBuild {
+			return errors.New("build write not allowed")
+		}
+	case groupConfigs:
+		if !svc.AllowConfigs {
+			return errors.New("configs write not allowed")
+		}
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------
+// Handler HTTP principal
+// ---------------------------------------------------------
+
+func (ps *ProxyState) resolveServiceForIP(ip string) *ServiceConfig {
+	// 1ère tentative rapide
+	if name, ok := ps.clients.Get(ip); ok {
+		return ps.cfg.Services[name]
+	}
+
+	// IP inconnue : on force un refresh synchrone
+	log.Printf("[acl] unknown client ip=%s, forcing discovery...", ip)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := dc.Ping(ctx); err != nil {
+	defer cancel()
+	if err := ps.discoverClients(ctx); err != nil {
+		log.Printf("[acl] discovery error while resolving ip=%s: %v", ip, err)
+	}
+
+	if name, ok := ps.clients.Get(ip); ok {
+		return ps.cfg.Services[name]
+	}
+
+	return nil
+}
+
+func rewriteAPIVersionIfNeeded(path string, svc *ServiceConfig) string {
+	if svc == nil || svc.APIVersionOverride == "" {
+		return path
+	}
+	// si path commence déjà par /vX.Y/, on remplace par /v<override>/
+	if strings.HasPrefix(path, "/v") {
+		// trouver le 2ème '/'
+		for i := 2; i < len(path); i++ {
+			if path[i] == '/' {
+				return "/v" + svc.APIVersionOverride + path[i:]
+			}
+			if (path[i] < '0' || path[i] > '9') && path[i] != '.' {
+				break
+			}
+		}
+	}
+	return path
+}
+
+func (ps *ProxyState) handler(w http.ResponseWriter, r *http.Request) {
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+	ip := normalizeIPv4(strings.TrimPrefix(remoteHost, "::ffff:"))
+
+	// Healthcheck interne sur /version depuis localhost
+	if r.URL.Path == "/version" && isLocalRemote(r.RemoteAddr) {
+		ps.handleHealth(w, r)
+		return
+	}
+
+	// Debug info de base
+	log.Printf("[req] ip=%s method=%s path=%s", ip, r.Method, r.URL.Path)
+
+	// Résolution du service à partir de l'IP (via label socketproxy.service)
+	svc := ps.resolveServiceForIP(ip)
+	if svc == nil {
+		log.Printf("[acl] deny ip=%s: no service mapped (no container with label socketproxy.service on this ip)", ip)
+		http.Error(w, "Forbidden: no socketproxy.service mapping for this client", http.StatusForbidden)
+		return
+	}
+
+	pi := classifyPath(r.URL.Path)
+	if err := checkACL(svc, pi, r.Method); err != nil {
+		log.Printf("[acl] deny ip=%s service=%s method=%s path=%s reason=%v",
+			ip, svc.Name, r.Method, r.URL.Path, err)
+		http.Error(w, "Forbidden by docker-socket-proxy ACL", http.StatusForbidden)
+		return
+	}
+
+	// Rewrite éventuel de la version d'API
+	origPath := r.URL.Path
+	r.URL.Path = rewriteAPIVersionIfNeeded(r.URL.Path, svc)
+
+	if origPath != r.URL.Path {
+		log.Printf("[rewrite] service=%s ip=%s %s -> %s", svc.Name, ip, origPath, r.URL.Path)
+	}
+
+	// On laisse le reverseProxy faire le boulot
+	ps.reverseProxy.ServeHTTP(w, r)
+}
+
+// ---------------------------------------------------------
+// main
+// ---------------------------------------------------------
+
+func main() {
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	cfg := parseConfigFromArgs()
+
+	if len(cfg.Services) == 0 {
+		log.Println("[fatal] no --proxy-<service>.* configuration found, nothing to do")
+		os.Exit(1)
+	}
+
+	dockerClient := newDockerHTTPClient(cfg.SocketPath)
+
+	// Découvrir les réseaux du socket-proxy lui-même
+	var allowedNets map[string]struct{}
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		nets, err := discoverSelfNetworks(ctx, dockerClient)
 		cancel()
-		log.Fatalf("docker ping failed on socket %s: %v", socketPath, err)
-	}
-	cancel()
-	log.Printf("[docker] ping OK on %s", socketPath)
-
-	am := NewAccessManager()
-
-	ctxInit, cancelInit := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := initialDiscovery(ctxInit, dc, am, profiles, labelKey); err != nil {
-		cancelInit()
-		log.Printf("[discover] error during initial discovery: %v", err)
-	} else {
-		cancelInit()
+		if err != nil {
+			log.Printf("[self] WARNING: cannot discover self networks: %v (no network filtering will be applied)", err)
+			allowedNets = make(map[string]struct{}) // vide = pas de filtrage
+		} else {
+			allowedNets = nets
+			log.Printf("[self] allowed networks for client IP mapping: %v", keysOfSet(allowedNets))
+		}
 	}
 
-	// Start events watcher
-	ctxEvents, cancelEvents := context.WithCancel(context.Background())
-	go watchEvents(ctxEvents, dc, am, profiles, labelKey)
-	defer cancelEvents()
-
-	ps := &ProxyServer{
-		docker:   dc,
-		access:   am,
-		profiles: profiles,
-		labelKey: labelKey,
+	targetURL, _ := url.Parse("http://docker")
+	rp := httputil.NewSingleHostReverseProxy(targetURL)
+	// On réutilise le transport du client Docker pour que tout passe par le socket Unix
+	rp.Transport = dockerClient.Transport
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("[proxy] error for path=%s: %v", r.URL.Path, err)
+		http.Error(w, "Bad gateway (error talking to docker)", http.StatusBadGateway)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", ps.healthHandler)
-	mux.HandleFunc("/", ps.proxyHandler)
+	state := &ProxyState{
+		cfg:             cfg,
+		dockerClient:    dockerClient,
+		reverseProxy:    rp,
+		clients:         &ClientIndex{ipToSvc: make(map[string]string)},
+		allowedNetworks: allowedNets,
+	}
 
-	addr := ":" + proxyPort
+	// Découverte initiale
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := state.discoverClients(ctx); err != nil {
+			log.Printf("[discover] initial discovery failed: %v", err)
+		}
+		cancel()
+	}
+
+	// Boucle de refresh périodique (pour gérer nouveaux containers / changements IP)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := state.discoverClients(ctx); err != nil {
+				log.Printf("[discover] periodic discovery error: %v", err)
+			}
+			cancel()
+		}
+	}()
+
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  0,
-		WriteTimeout: 0,
+		Addr:         cfg.ListenAddr,
+		Handler:      http.HandlerFunc(state.handler),
+		ReadTimeout:  120 * time.Second,
+		WriteTimeout: 0, // pour laisser vivre les flux longues (exec attach, logs, etc.)
 	}
 
-	log.Printf("[http] listening on %s (Docker socket: %s)", addr, socketPath)
-
+	log.Printf("[startup] docker-socket-proxy (go) listening on %s, socket=%s", cfg.ListenAddr, cfg.SocketPath)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("[http] server error: %v", err)
+		log.Fatalf("[fatal] ListenAndServe error: %v", err)
 	}
 }
