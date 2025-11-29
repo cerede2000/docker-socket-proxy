@@ -250,7 +250,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 	// Chemin par défaut du fichier de profils
 	profilesPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE"))
 	if profilesPath == "" {
-		profilesPath = "/config/profile.yml"
+		profilesPath = "/config/profiles.yml"
 	}
 
 	cfg := &ProxyConfig{
