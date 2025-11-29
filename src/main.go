@@ -930,19 +930,59 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 // Mode healthcheck
 // -----------------------------
 
+// -----------------------------
+// Mode healthcheck
+// -----------------------------
+
 func runHealthcheck() int {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+
+	// 1) Vérifier que le listener HTTP du proxy est up (TCP 127.0.0.1:2375)
+	// Possibilité de surcharger via env si besoin :
+	//   SOCKETPROXY_HEALTH_LISTEN="127.0.0.1:2376"
+	listenAddr := strings.TrimSpace(os.Getenv("SOCKETPROXY_HEALTH_LISTEN"))
+	if listenAddr == "" {
+		// Valeur par défaut cohérente avec cfg.Listen = ":2375"
+		listenAddr = "127.0.0.1:2375"
+	}
+
+	logger.Printf("[health] checking HTTP listener on %s", listenAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:2375/version", nil)
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", listenAddr)
+	if err != nil {
+		logger.Printf("[health] TCP connect error: %v", err)
+		return 1
+	}
+	_ = conn.Close()
+
+	// 2) Vérifier que le daemon Docker est accessible via le socket Unix
+	//   SOCKETPROXY_HEALTH_SOCKET pour override éventuel
+	socketPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_HEALTH_SOCKET"))
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
+
+	logger.Printf("[health] checking Docker socket at %s", socketPath)
+
+	tr := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
+		},
+	}
+	client := &http.Client{Transport: tr}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/_ping", nil)
 	if err != nil {
 		logger.Printf("[health] build request error: %v", err)
 		return 1
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("[health] request error: %v", err)
 		return 1
@@ -950,7 +990,7 @@ func runHealthcheck() int {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Printf("[health] bad status: %d", resp.StatusCode)
+		logger.Printf("[health] bad status from Docker /_ping: %d", resp.StatusCode)
 		return 1
 	}
 
