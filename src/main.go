@@ -17,6 +17,12 @@ import (
 	"time"
 )
 
+// Variables renseignées par -ldflags au build
+var (
+	version = "dev"
+	gitSha  = "unknown"
+)
+
 // -----------------------------
 // Types de configuration
 // -----------------------------
@@ -76,15 +82,15 @@ type dockerNetwork struct {
 	IPAddress string `json:"IPAddress"`
 }
 
+type dockerContainerNetworkBlock struct {
+	Networks map[string]dockerNetwork `json:"Networks"`
+}
+
 type dockerContainerSummary struct {
 	ID              string                      `json:"Id"`
 	Names           []string                    `json:"Names"`
 	Labels          map[string]string           `json:"Labels"`
 	NetworkSettings dockerContainerNetworkBlock `json:"NetworkSettings"`
-}
-
-type dockerContainerNetworkBlock struct {
-	Networks map[string]dockerNetwork `json:"Networks"`
 }
 
 type dockerContainerInspect struct {
@@ -138,14 +144,13 @@ func applyDefaultProfileFlags(s *ServiceConfig, role string) {
 	if anyRightsSet(s) {
 		return
 	}
-	// Profil par défaut = lecture "classique"
+	// Profil par défaut de lecture
 	s.Ping = true
 	s.Version = true
 	s.Info = true
 	s.Containers = true
 	s.Images = true
 	s.Networks = true
-	// Pas de POST par défaut
 }
 
 func applyFlagValue(s *ServiceConfig, flag, value string) {
@@ -247,7 +252,7 @@ func discoverIntervalFromEnv(logger *log.Logger) time.Duration {
 }
 
 func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
-	// Chemin par défaut du fichier de profils
+	// Fichier de profils par défaut
 	profilesPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE"))
 	if profilesPath == "" {
 		profilesPath = "/config/profiles.yml"
@@ -270,17 +275,15 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		}
 		opt := strings.TrimPrefix(arg, "--")
 
-		// --listen=:2375
+		// Options globales
 		if strings.HasPrefix(opt, "listen=") {
 			cfg.Listen = strings.TrimPrefix(opt, "listen=")
 			continue
 		}
-		// --socket=/var/run/docker.sock
 		if strings.HasPrefix(opt, "socket=") {
 			cfg.SocketPath = strings.TrimPrefix(opt, "socket=")
 			continue
 		}
-		// --discover-interval=10s ou 15
 		if strings.HasPrefix(opt, "discover-interval=") {
 			val := strings.TrimPrefix(opt, "discover-interval=")
 			if d, err := time.ParseDuration(val); err == nil && d > 0 {
@@ -290,18 +293,17 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 			}
 			continue
 		}
-		// --profiles=/config/autre.yml (override du chemin)
 		if strings.HasPrefix(opt, "profiles=") {
 			cfg.ProfilesFile = strings.TrimPrefix(opt, "profiles=")
 			continue
 		}
 
-		// Profils / flags : deux formes
+		// Profils / flags :
 		// 1) --proxy-home.ping=1
-		// 2) --home (profil avec droits par défaut)
+		// 2) --home
 		if strings.Contains(opt, ".") {
 			parts := strings.SplitN(opt, ".", 2)
-			profileKey := parts[0] // ex: "proxy-home" ou "home"
+			profileKey := parts[0]
 			rest := parts[1]
 
 			flagKey := rest
@@ -316,14 +318,12 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 			svc := ensureService(cfg.baseServices, role)
 			applyFlagValue(svc, flagKey, valStr)
 		} else {
-			// ex: --home, --portainer
 			role := normalizeRoleName(opt)
 			svc := ensureService(cfg.baseServices, role)
 			applyDefaultProfileFlags(svc, role)
 		}
 	}
 
-	// Par défaut, services effectifs = base (en attendant le YAML éventuel)
 	cfg.services = cloneServices(cfg.baseServices)
 
 	logger.Printf("[config] listen=%s socket=%s discover=%s profilesFile=%s",
@@ -343,7 +343,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 }
 
 // -----------------------------
-// Parser YAML "light" pour profils
+// Parser YAML très simple pour profils
 // -----------------------------
 
 func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
@@ -354,7 +354,6 @@ func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// enlever commentaire
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			line = line[:idx]
 		}
@@ -362,8 +361,7 @@ func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
 			continue
 		}
 
-		// Nouvelle section (profil):
-		// home:
+		// Nouvelle section : "home:"
 		if !strings.HasPrefix(line, " ") && strings.HasSuffix(strings.TrimSpace(line), ":") {
 			name := strings.TrimSpace(line)
 			name = strings.TrimSuffix(name, ":")
@@ -412,7 +410,6 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 	data, err := os.ReadFile(cfg.ProfilesFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Fichier pas encore créé → ce n'est pas une erreur
 			logger.Printf("[profiles] file %s not found (skip, will watch for creation)", cfg.ProfilesFile)
 			return nil
 		}
@@ -421,15 +418,15 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	m, err := parseProfilesYAML(string(data))
 	if err != nil {
+		// IMPORTANT : on log et on ignore, on ne casse pas le service
 		return fmt.Errorf("parse profiles yaml: %w", err)
 	}
 
-	// On repart d’une copie des services CLI, puis on écrase par le YAML
 	newServices := cloneServices(cfg.baseServices)
 
 	for rawName, flags := range m {
 		role := normalizeRoleName(rawName)
-		s := &ServiceConfig{Name: role} // YAML = source autoritaire
+		s := &ServiceConfig{Name: role}
 		for k, v := range flags {
 			applyFlagValue(s, k, strconv.FormatBool(v))
 		}
@@ -468,13 +465,12 @@ func profileWatcher(ctx context.Context, cfg *ProxyConfig, logger *log.Logger) {
 				if !os.IsNotExist(err) {
 					logger.Printf("[profiles] stat error: %v", err)
 				}
-				// fichier absent → on attend qu'il apparaisse
 				continue
 			}
 			mt := info.ModTime()
 			if mt.After(lastMod) {
 				if err := loadProfilesFromFile(cfg, logger); err != nil {
-					logger.Printf("[profiles] reload error: %v", err)
+					logger.Printf("[profiles] reload error: %v (keeping previous config)", err)
 				} else {
 					lastMod = mt
 					logger.Printf("[profiles] reloaded after change (%s)", mt)
@@ -498,13 +494,20 @@ func newDockerHTTPClient(socketPath string) *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+func keysOfSet(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func getSelfNetworks(ctx context.Context, client *http.Client, logger *log.Logger) (map[string]struct{}, error) {
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		return nil, fmt.Errorf("cannot get hostname: %w", err)
 	}
 
-	// /containers/<id>/json
 	path := "/containers/" + hostname + "/json"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
 	if err != nil {
@@ -531,14 +534,6 @@ func getSelfNetworks(ctx context.Context, client *http.Client, logger *log.Logge
 	}
 	logger.Printf("[discover] self container=%s networks=%v", hostname, keysOfSet(nets))
 	return nets, nil
-}
-
-func keysOfSet(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) error {
@@ -569,7 +564,6 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 		}
 		name := strings.TrimPrefix(c.Names[0], "/")
 
-		// Rôle via label socketproxy.role (nouveau), fallback socketproxy.service (ancien)
 		roleLabel := c.Labels["socketproxy.role"]
 		if roleLabel == "" {
 			roleLabel = c.Labels["socketproxy.service"]
@@ -588,7 +582,6 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 
 		var ips []string
 		for netName, nw := range c.NetworkSettings.Networks {
-			// si on connaît nos réseaux, on filtre dessus
 			if len(cfg.selfNetworks) > 0 {
 				if _, ok := cfg.selfNetworks[netName]; !ok {
 					continue
@@ -637,7 +630,6 @@ func trimAPIVersion(path string) string {
 	if !strings.HasPrefix(path, "/v") {
 		return path
 	}
-	// /v1.44/...
 	idx := strings.Index(path[2:], "/")
 	if idx == -1 {
 		return path
@@ -657,7 +649,6 @@ func trimAPIVersion(path string) string {
 }
 
 func classifyPath(path string) (feature string, action string) {
-	// virer la query
 	if i := strings.Index(path, "?"); i >= 0 {
 		path = path[:i]
 	}
@@ -734,7 +725,6 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 	isWrite := method == http.MethodPost || method == http.MethodPut ||
 		method == http.MethodPatch || method == http.MethodDelete
 
-	// 1) feature activé ?
 	switch feature {
 	case "ping":
 		if !s.Ping {
@@ -825,21 +815,17 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 			return false
 		}
 	default:
-		// feature inconnu => refus
 		return false
 	}
 
-	// 2) lecture seule => ok
 	if !isWrite {
 		return true
 	}
 
-	// 3) écriture globale
 	if !s.Post {
 		return false
 	}
 
-	// 4) cas particuliers start/stop/restart sur containers
 	if feature == "containers" {
 		switch action {
 		case "start":
@@ -878,9 +864,9 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 		path := r.URL.Path
 		method := r.Method
 
-		// Healthcheck local (dans le conteneur)
+		// Health local : accès direct à /version depuis localhost
 		if isLocalIP(host) && isVersionPath(path) {
-			logger.Printf("[health] local healthcheck ip=%s method=%s path=%s", host, method, path)
+			logger.Printf("[health] local check ip=%s method=%s path=%s", host, method, path)
 			proxy.ServeHTTP(w, r)
 			return
 		}
@@ -915,20 +901,57 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 }
 
 // -----------------------------
+// Mode healthcheck
+// -----------------------------
+
+func runHealthcheck() int {
+	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:2375/version", nil)
+	if err != nil {
+		logger.Printf("[health] build request error: %v", err)
+		return 1
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logger.Printf("[health] request error: %v", err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Printf("[health] bad status: %d", resp.StatusCode)
+		return 1
+	}
+
+	logger.Printf("[health] OK")
+	return 0
+}
+
+// -----------------------------
 // main
 // -----------------------------
 
 func main() {
+	// Mode healthcheck : "docker-socket-proxy healthcheck"
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		code := runHealthcheck()
+		os.Exit(code)
+	}
+
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger.Printf("[main] starting docker-socket-proxy version=%s git=%s", version, gitSha)
 
 	cfg := parseConfig(os.Args[1:], logger)
-
 	dockerClient := newDockerHTTPClient(cfg.SocketPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Réseaux du conteneur socket-proxy (pour filtrer les IPs)
 	nets, err := getSelfNetworks(ctx, dockerClient, logger)
 	if err != nil {
 		logger.Printf("[discover] WARNING: cannot get self networks: %v (using all networks)", err)
@@ -936,24 +959,18 @@ func main() {
 		cfg.selfNetworks = nets
 	}
 
-	// Découverte initiale
 	if err := discoverOnce(ctx, cfg, dockerClient, logger); err != nil {
 		logger.Printf("[discover] initial error: %v", err)
 	}
 
-	// Chargement initial des profils YAML (optionnel)
 	if err := loadProfilesFromFile(cfg, logger); err != nil {
-		logger.Printf("[profiles] initial load error: %v", err)
+		logger.Printf("[profiles] initial load error: %v (using CLI config only)", err)
 	}
 
-	// Boucle de découverte
 	go discoverLoop(ctx, cfg, dockerClient, logger)
-
-	// Watcher du fichier de profils (même s’il n’existe pas encore)
 	go profileWatcher(ctx, cfg, logger)
 
-	// Reverse proxy vers Docker
-	targetURL, _ := url.Parse("http://docker") // host fictif
+	targetURL, _ := url.Parse("http://docker")
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = dockerClient.Transport
 	proxy.ErrorLog = logger
