@@ -154,6 +154,8 @@ func applyDefaultProfileFlags(s *ServiceConfig, role string) {
 }
 
 func applyFlagValue(s *ServiceConfig, flag, value string) {
+	// NOTE : pour apirewrite, la logique YAML est gérée dans loadProfilesFromFile.
+	// Ici on garde le comportement existant (CLI) inchangé.
 	b := parseBoolString(value)
 	f := strings.ToLower(strings.TrimSpace(flag))
 
@@ -211,6 +213,8 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 	case "allow_restart", "allow_restarts":
 		s.AllowRestart = b
 	case "apirewrite":
+		// Comportement CLI existant : on se base sur un bool.
+		// (YAML ne passe plus par ce chemin pour apirewrite, voir loadProfilesFromFile.)
 		if b {
 			s.APIRewrite = value
 		} else {
@@ -346,14 +350,17 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 // Parser YAML très simple pour profils
 // -----------------------------
 
-func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
-	profiles := make(map[string]map[string]bool)
+// On passe de map[string]map[string]bool -> map[string]map[string]string
+// pour pouvoir gérer apirewrite: "1.51" en plus des booléens.
+func parseProfilesYAML(content string) (map[string]map[string]string, error) {
+	profiles := make(map[string]map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var current string
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// Retirer les commentaires (# ...) et trim
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			line = line[:idx]
 		}
@@ -370,12 +377,12 @@ func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
 			}
 			current = name
 			if _, ok := profiles[current]; !ok {
-				profiles[current] = make(map[string]bool)
+				profiles[current] = make(map[string]string)
 			}
 			continue
 		}
 
-		// Ligne de flag : "  ping: true"
+		// Ligne de flag : "  ping: true" ou "  apirewrite: 1.51"
 		if current == "" {
 			continue
 		}
@@ -392,7 +399,10 @@ func parseProfilesYAML(content string) (map[string]map[string]bool, error) {
 		if key == "" || valStr == "" {
 			continue
 		}
-		profiles[current][key] = parseBoolString(valStr)
+
+		// On garde la valeur brute en string. Les bool seront traités plus tard
+		// via parseBoolString dans applyFlagValue.
+		profiles[current][key] = valStr
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -427,9 +437,25 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 	for rawName, flags := range m {
 		role := normalizeRoleName(rawName)
 		s := &ServiceConfig{Name: role}
+
 		for k, v := range flags {
-			applyFlagValue(s, k, strconv.FormatBool(v))
+			// apirewrite en YAML : on gère la valeur directement ici
+			if strings.EqualFold(k, "apirewrite") {
+				val := strings.TrimSpace(v)
+				if val == "" || parseBoolString(val) == false && val == "0" {
+					// vide / 0 / false -> désactive
+					s.APIRewrite = ""
+				} else {
+					// ex : "1.51"
+					s.APIRewrite = val
+				}
+				continue
+			}
+
+			// Pour tous les autres flags, on réutilise la logique existante
+			applyFlagValue(s, k, v)
 		}
+
 		newServices[role] = s
 	}
 
@@ -437,9 +463,9 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	logger.Printf("[profiles] loaded %d profiles from %s", len(newServices), cfg.ProfilesFile)
 	for name, svc := range cfg.services {
-		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v",
+		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v apirewrite=%q",
 			name, svc.Ping, svc.Version, svc.Info, svc.Events, svc.Containers,
-			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart)
+			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.APIRewrite)
 	}
 
 	return nil
