@@ -247,11 +247,17 @@ func discoverIntervalFromEnv(logger *log.Logger) time.Duration {
 }
 
 func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
+	// Chemin par défaut du fichier de profils
+	profilesPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE"))
+	if profilesPath == "" {
+		profilesPath = "/config/profile.yml"
+	}
+
 	cfg := &ProxyConfig{
 		Listen:           ":2375",
 		SocketPath:       "/var/run/docker.sock",
 		DiscoverInterval: discoverIntervalFromEnv(logger),
-		ProfilesFile:     strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE")),
+		ProfilesFile:     profilesPath,
 		baseServices:     make(map[string]*ServiceConfig),
 		services:         make(map[string]*ServiceConfig),
 		ipToRole:         make(map[string]string),
@@ -284,7 +290,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 			}
 			continue
 		}
-		// --profiles=/config/profiles.yml
+		// --profiles=/config/autre.yml (override du chemin)
 		if strings.HasPrefix(opt, "profiles=") {
 			cfg.ProfilesFile = strings.TrimPrefix(opt, "profiles=")
 			continue
@@ -405,6 +411,11 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	data, err := os.ReadFile(cfg.ProfilesFile)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Fichier pas encore créé → ce n'est pas une erreur
+			logger.Printf("[profiles] file %s not found (skip, will watch for creation)", cfg.ProfilesFile)
+			return nil
+		}
 		return fmt.Errorf("read profiles file: %w", err)
 	}
 
@@ -454,15 +465,19 @@ func profileWatcher(ctx context.Context, cfg *ProxyConfig, logger *log.Logger) {
 		case <-ticker.C:
 			info, err := os.Stat(cfg.ProfilesFile)
 			if err != nil {
+				if !os.IsNotExist(err) {
+					logger.Printf("[profiles] stat error: %v", err)
+				}
+				// fichier absent → on attend qu'il apparaisse
 				continue
 			}
 			mt := info.ModTime()
 			if mt.After(lastMod) {
-				lastMod = mt
 				if err := loadProfilesFromFile(cfg, logger); err != nil {
 					logger.Printf("[profiles] reload error: %v", err)
 				} else {
-					logger.Printf("[profiles] reloaded after file change")
+					lastMod = mt
+					logger.Printf("[profiles] reloaded after change (%s)", mt)
 				}
 			}
 		}
@@ -926,16 +941,16 @@ func main() {
 		logger.Printf("[discover] initial error: %v", err)
 	}
 
+	// Chargement initial des profils YAML (optionnel)
+	if err := loadProfilesFromFile(cfg, logger); err != nil {
+		logger.Printf("[profiles] initial load error: %v", err)
+	}
+
 	// Boucle de découverte
 	go discoverLoop(ctx, cfg, dockerClient, logger)
 
-	// Chargement initial des profils YAML + watcher
-	if cfg.ProfilesFile != "" {
-		if err := loadProfilesFromFile(cfg, logger); err != nil {
-			logger.Printf("[profiles] initial load error: %v", err)
-		}
-		go profileWatcher(ctx, cfg, logger)
-	}
+	// Watcher du fichier de profils (même s’il n’existe pas encore)
+	go profileWatcher(ctx, cfg, logger)
 
 	// Reverse proxy vers Docker
 	targetURL, _ := url.Parse("http://docker") // host fictif
@@ -952,8 +967,8 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s",
-		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval)
+	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, profilesFile=%s",
+		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.ProfilesFile)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
