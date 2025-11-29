@@ -35,6 +35,6 @@ EXPOSE 2375
 
 # Healthcheck intégré : teste le serveur Go + accès Docker via /version
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["/docker-socket-proxy", "healthcheck"]
+  CMD ["docker-socket-proxy", "healthcheck"]
 
 ENTRYPOINT ["docker-socket-proxy"]
