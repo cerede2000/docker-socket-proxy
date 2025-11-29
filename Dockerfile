@@ -23,20 +23,20 @@ RUN go build -trimpath \
 # =========================
 # Stage 2 : image finale
 # =========================
-FROM alpine:3.20
+#FROM alpine:3.20 si debug
+FROM gcr.io/distroless/base-debian12
 
 RUN apk add --no-cache ca-certificates
 
 COPY --from=build /out/docker-socket-proxy /usr/local/bin/docker-socket-proxy
-COPY config/ /config/
 
 ENV DOCKER_SOCKET_PATH=/var/run/docker.sock \
     PROXY_PORT=2375
 
 EXPOSE 2375
 
-# Healthcheck => /healthz (déjà implémenté dans main.go)
-HEALTHCHECK --interval=5s --timeout=3s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:2375/healthz || exit 1
+# Healthcheck intégré : teste le serveur Go + accès Docker via /version
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/docker-socket-proxy", "healthcheck"]
 
 ENTRYPOINT ["docker-socket-proxy"]
