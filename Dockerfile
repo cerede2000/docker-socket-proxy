@@ -13,7 +13,7 @@ ENV GO111MODULE=off \
 WORKDIR /src
 
 # On copie juste le dossier src/
-COPY src/*.go ./src
+COPY src/ ./src
 
 # Build du binaire
 RUN go build -trimpath \
@@ -28,7 +28,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 
 COPY --from=build /out/docker-socket-proxy /usr/local/bin/docker-socket-proxy
-COPY src/*.yml /config/
+COPY config/ /config/
 
 ENV DOCKER_SOCKET_PATH=/var/run/docker.sock \
     PROXY_PORT=2375
