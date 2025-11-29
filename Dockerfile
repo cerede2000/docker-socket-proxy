@@ -26,8 +26,6 @@ RUN go build -trimpath \
 #FROM alpine:3.20 si debug
 FROM gcr.io/distroless/base-debian12
 
-RUN apk add --no-cache ca-certificates
-
 COPY --from=build /out/docker-socket-proxy /usr/local/bin/docker-socket-proxy
 
 ENV DOCKER_SOCKET_PATH=/var/run/docker.sock \
