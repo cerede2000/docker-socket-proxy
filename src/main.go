@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -99,6 +100,16 @@ type dockerContainerInspect struct {
 	NetworkSettings dockerContainerNetworkBlock `json:"NetworkSettings"`
 }
 
+// Événement Docker pour /events
+type dockerEvent struct {
+	Type   string `json:"Type"`
+	Action string `json:"Action"`
+	Actor  struct {
+		ID         string            `json:"ID"`
+		Attributes map[string]string `json:"Attributes"`
+	} `json:"Actor"`
+}
+
 // -----------------------------
 // Utilitaires généraux
 // -----------------------------
@@ -154,8 +165,6 @@ func applyDefaultProfileFlags(s *ServiceConfig, role string) {
 }
 
 func applyFlagValue(s *ServiceConfig, flag, value string) {
-	// NOTE : pour apirewrite, la logique YAML est gérée dans loadProfilesFromFile.
-	// Ici on garde le comportement existant (CLI) inchangé.
 	b := parseBoolString(value)
 	f := strings.ToLower(strings.TrimSpace(flag))
 
@@ -213,13 +222,8 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 	case "allow_restart", "allow_restarts":
 		s.AllowRestart = b
 	case "apirewrite":
-		// Comportement CLI existant : on se base sur un bool.
-		// (YAML ne passe plus par ce chemin pour apirewrite, voir loadProfilesFromFile.)
-		if b {
-			s.APIRewrite = value
-		} else {
-			s.APIRewrite = ""
-		}
+		// Pour apirewrite, on prend la valeur brute (ex: "1.51")
+		s.APIRewrite = strings.TrimSpace(value)
 	}
 }
 
@@ -350,8 +354,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 // Parser YAML très simple pour profils
 // -----------------------------
 
-// On passe de map[string]map[string]bool -> map[string]map[string]string
-// pour pouvoir gérer apirewrite: "1.51" en plus des booléens.
+// On retourne map[profil][clé]valeur (valeur brute string pour pouvoir gérer apirewrite: "1.51")
 func parseProfilesYAML(content string) (map[string]map[string]string, error) {
 	profiles := make(map[string]map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(content))
@@ -360,7 +363,6 @@ func parseProfilesYAML(content string) (map[string]map[string]string, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Retirer les commentaires (# ...) et trim
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			line = line[:idx]
 		}
@@ -400,8 +402,12 @@ func parseProfilesYAML(content string) (map[string]map[string]string, error) {
 			continue
 		}
 
-		// On garde la valeur brute en string. Les bool seront traités plus tard
-		// via parseBoolString dans applyFlagValue.
+		// On enlève des guillemets éventuels
+		if len(valStr) >= 2 && ((valStr[0] == '"' && valStr[len(valStr)-1] == '"') ||
+			(valStr[0] == '\'' && valStr[len(valStr)-1] == '\'')) {
+			valStr = valStr[1 : len(valStr)-1]
+		}
+
 		profiles[current][key] = valStr
 	}
 
@@ -437,25 +443,9 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 	for rawName, flags := range m {
 		role := normalizeRoleName(rawName)
 		s := &ServiceConfig{Name: role}
-
 		for k, v := range flags {
-			// apirewrite en YAML : on gère la valeur directement ici
-			if strings.EqualFold(k, "apirewrite") {
-				val := strings.TrimSpace(v)
-				if val == "" || parseBoolString(val) == false && val == "0" {
-					// vide / 0 / false -> désactive
-					s.APIRewrite = ""
-				} else {
-					// ex : "1.51"
-					s.APIRewrite = val
-				}
-				continue
-			}
-
-			// Pour tous les autres flags, on réutilise la logique existante
 			applyFlagValue(s, k, v)
 		}
-
 		newServices[role] = s
 	}
 
@@ -644,6 +634,133 @@ func discoverLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 			logger.Printf("[discover] loop stopped")
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// -----------------------------
+// Boucle d'écoute des events Docker
+// -----------------------------
+
+func shouldTriggerDiscover(ev dockerEvent) bool {
+	if ev.Type != "container" {
+		return false
+	}
+
+	// On rafraîchit sur les événements de cycle de vie classiques
+	switch ev.Action {
+	case "start", "stop", "die", "destroy", "pause", "unpause", "update", "create":
+		return true
+	}
+
+	// Ou si un conteneur porte le label socketproxy.role
+	if ev.Actor.Attributes != nil {
+		if _, ok := ev.Actor.Attributes["socketproxy.role"]; ok {
+			return true
+		}
+		if _, ok := ev.Actor.Attributes["socketproxy.service"]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) {
+	// Fallback si pas d'intervalle de découverte (devrait toujours être >0)
+	backoff := 2 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Printf("[events] loop stopped (context done)")
+			return
+		default:
+		}
+
+		// On écoute uniquement les events de type container
+		filterJSON := `{"type":["container"]}`
+		eventsURL := "http://unix/events?filters=" + url.QueryEscape(filterJSON)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventsURL, nil)
+		if err != nil {
+			logger.Printf("[events] build request error: %v", err)
+			time.Sleep(backoff)
+			continue
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				logger.Printf("[events] request aborted (context done): %v", err)
+				return
+			}
+			logger.Printf("[events] request error: %v (retrying in %s)", err, backoff)
+			time.Sleep(backoff)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			logger.Printf("[events] bad status: %d (retrying in %s)", resp.StatusCode, backoff)
+			resp.Body.Close()
+			time.Sleep(backoff)
+			continue
+		}
+
+		logger.Printf("[events] connected to /events stream")
+
+		dec := json.NewDecoder(resp.Body)
+
+		for {
+			var ev dockerEvent
+			if err := dec.Decode(&ev); err != nil {
+				if err == io.EOF {
+					logger.Printf("[events] EOF on events stream")
+				} else {
+					if ctx.Err() != nil {
+						logger.Printf("[events] decode stopped due to context: %v", err)
+					} else {
+						logger.Printf("[events] decode error: %v", err)
+					}
+				}
+				break
+			}
+
+			if !shouldTriggerDiscover(ev) {
+				continue
+			}
+
+			roleAttr := ""
+			if ev.Actor.Attributes != nil {
+				if v, ok := ev.Actor.Attributes["socketproxy.role"]; ok {
+					roleAttr = v
+				} else if v, ok := ev.Actor.Attributes["socketproxy.service"]; ok {
+					roleAttr = v
+				}
+			}
+
+			logger.Printf("[events] container id=%s action=%s roleAttr=%q -> triggering discovery",
+				shortID(ev.Actor.ID), ev.Action, roleAttr)
+
+			if err := discoverOnce(ctx, cfg, client, logger); err != nil {
+				logger.Printf("[events] discover error: %v", err)
+			}
+		}
+
+		resp.Body.Close()
+
+		select {
+		case <-ctx.Done():
+			logger.Printf("[events] loop stopped after stream close")
+			return
+		case <-time.After(backoff):
 		}
 	}
 }
@@ -930,59 +1047,19 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 // Mode healthcheck
 // -----------------------------
 
-// -----------------------------
-// Mode healthcheck
-// -----------------------------
-
 func runHealthcheck() int {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-
-	// 1) Vérifier que le listener HTTP du proxy est up (TCP 127.0.0.1:2375)
-	// Possibilité de surcharger via env si besoin :
-	//   SOCKETPROXY_HEALTH_LISTEN="127.0.0.1:2376"
-	listenAddr := strings.TrimSpace(os.Getenv("SOCKETPROXY_HEALTH_LISTEN"))
-	if listenAddr == "" {
-		// Valeur par défaut cohérente avec cfg.Listen = ":2375"
-		listenAddr = "127.0.0.1:2375"
-	}
-
-	logger.Printf("[health] checking HTTP listener on %s", listenAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", listenAddr)
-	if err != nil {
-		logger.Printf("[health] TCP connect error: %v", err)
-		return 1
-	}
-	_ = conn.Close()
-
-	// 2) Vérifier que le daemon Docker est accessible via le socket Unix
-	//   SOCKETPROXY_HEALTH_SOCKET pour override éventuel
-	socketPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_HEALTH_SOCKET"))
-	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
-	}
-
-	logger.Printf("[health] checking Docker socket at %s", socketPath)
-
-	tr := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.Dial("unix", socketPath)
-		},
-	}
-	client := &http.Client{Transport: tr}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/_ping", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:2375/version", nil)
 	if err != nil {
 		logger.Printf("[health] build request error: %v", err)
 		return 1
 	}
 
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		logger.Printf("[health] request error: %v", err)
 		return 1
@@ -990,7 +1067,7 @@ func runHealthcheck() int {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Printf("[health] bad status from Docker /_ping: %d", resp.StatusCode)
+		logger.Printf("[health] bad status: %d", resp.StatusCode)
 		return 1
 	}
 
@@ -1025,16 +1102,23 @@ func main() {
 		cfg.selfNetworks = nets
 	}
 
+	// Découverte initiale (il se peut qu'il n'y ait encore aucun client)
 	if err := discoverOnce(ctx, cfg, dockerClient, logger); err != nil {
 		logger.Printf("[discover] initial error: %v", err)
 	}
 
+	// Chargement initial des profiles
 	if err := loadProfilesFromFile(cfg, logger); err != nil {
 		logger.Printf("[profiles] initial load error: %v (using CLI config only)", err)
 	}
 
+	// Boucles de fond :
+	// - découverte périodique
+	// - watcher du fichier de profiles
+	// - écoute des events Docker (update au fil de l'eau)
 	go discoverLoop(ctx, cfg, dockerClient, logger)
 	go profileWatcher(ctx, cfg, logger)
+	go eventLoop(ctx, cfg, dockerClient, logger)
 
 	targetURL, _ := url.Parse("http://docker")
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
