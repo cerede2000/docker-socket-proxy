@@ -576,6 +576,28 @@ func newDockerHTTPClient(socketPath string) *http.Client {
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
 		DisableKeepAlives:   false,
+		// Pas de ResponseHeaderTimeout pour supporter /events
+		ResponseHeaderTimeout: 0,
+	}
+	return &http.Client{
+		Transport: tr,
+		// Timeout à 0 pour supporter les connexions longues (/events)
+		Timeout:   0,
+	}
+}
+
+// newDockerHTTPClientWithTimeout crée un client avec timeout pour les opérations normales
+func newDockerHTTPClientWithTimeout(socketPath string) *http.Client {
+	tr := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
+		},
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		DisableCompression:    false,
+		DisableKeepAlives:     false,
+		ResponseHeaderTimeout: 10 * time.Second,
 	}
 	return &http.Client{
 		Transport: tr,
@@ -1401,18 +1423,23 @@ func main() {
 	logger.Printf("[main] starting docker-socket-proxy version=%s git=%s", version, gitSha)
 
 	cfg := parseConfig(os.Args[1:], logger)
-	dockerClient := newDockerHTTPClient(cfg.SocketPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// Client pour le proxy (sans timeout pour supporter /events)
+	proxyClient := newDockerHTTPClient(cfg.SocketPath)
+	
+	// Client avec timeout pour les opérations de découverte
+	discoveryClient := newDockerHTTPClientWithTimeout(cfg.SocketPath)
+
 	// Initialisation du cache DNS pour les réseaux
-	if err := getSelfNetworksWithCache(ctx, cfg, dockerClient, logger); err != nil {
+	if err := getSelfNetworksWithCache(ctx, cfg, discoveryClient, logger); err != nil {
 		logger.Printf("[discover] WARNING: cannot get self networks: %v (using all networks)", err)
 	}
 
 	// Découverte initiale (il se peut qu'il n'y ait encore aucun client)
-	if err := discoverOnce(ctx, cfg, dockerClient, logger); err != nil {
+	if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
 		logger.Printf("[discover] initial error: %v", err)
 	}
 
@@ -1422,16 +1449,17 @@ func main() {
 	}
 
 	// Boucles de fond :
-	// - découverte périodique
+	// - découverte périodique (avec timeout)
 	// - watcher du fichier de profiles
-	// - écoute des events Docker (update au fil de l'eau avec debouncing intelligent)
-	go discoverLoop(ctx, cfg, dockerClient, logger)
+	// - écoute des events Docker (update au fil de l'eau avec debouncing intelligent, avec timeout)
+	go discoverLoop(ctx, cfg, discoveryClient, logger)
 	go profileWatcher(ctx, cfg, logger)
-	go eventLoop(ctx, cfg, dockerClient, logger)
+	go eventLoop(ctx, cfg, discoveryClient, logger)
 
 	targetURL, _ := url.Parse("http://docker")
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.Transport = dockerClient.Transport
+	// Utiliser le client SANS timeout pour le proxy (support /events)
+	proxy.Transport = proxyClient.Transport
 	proxy.ErrorLog = logger
 
 	handler := proxyHandler(cfg, proxy, logger)
@@ -1440,8 +1468,10 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// WriteTimeout doit être 0 pour supporter les connexions longues comme /events
+		// Traefik et autres clients maintiennent /events ouvert indéfiniment
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
