@@ -647,22 +647,23 @@ func shouldTriggerDiscover(ev dockerEvent) bool {
 		return false
 	}
 
-	// On rafraîchit sur les événements de cycle de vie classiques
+	// Les healthchecks et commandes internes génèrent des exec_* très fréquents
+	if strings.HasPrefix(ev.Action, "exec_") {
+		return false
+	}
+
+	// Les changements de statut de santé ne changent pas l'IP/role
+	if strings.HasPrefix(ev.Action, "health_status") {
+		return false
+	}
+
 	switch ev.Action {
-	case "start", "stop", "die", "destroy", "pause", "unpause", "update", "create":
+	case "start", "stop", "die", "destroy", "update", "create", "rename", "pause", "unpause":
 		return true
 	}
 
-	// Ou si un conteneur porte le label socketproxy.role
-	if ev.Actor.Attributes != nil {
-		if _, ok := ev.Actor.Attributes["socketproxy.role"]; ok {
-			return true
-		}
-		if _, ok := ev.Actor.Attributes["socketproxy.service"]; ok {
-			return true
-		}
-	}
-
+	// On ne déclenche plus sur la simple présence de labels ici,
+	// car l'event "update" couvre déjà les changements de labels.
 	return false
 }
 
@@ -685,8 +686,11 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 		default:
 		}
 
-		// On écoute uniquement les events de type container
-		filterJSON := `{"type":["container"]}`
+		// On écoute uniquement les events utiles au mapping IP/role
+		filterJSON := `{
+		  "type":["container"],
+		  "event":["create","start","stop","die","destroy","update","rename"]
+		}`
 		eventsURL := "http://unix/events?filters=" + url.QueryEscape(filterJSON)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventsURL, nil)
