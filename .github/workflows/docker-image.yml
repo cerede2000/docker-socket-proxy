@@ -13,6 +13,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/docker-socket-proxy
+  PKG_NAME: docker-socket-proxy
 
 jobs:
   build-and-push:
@@ -38,13 +39,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # tag basé sur la branche (ex: main, feature-x)
             type=ref,event=branch
-            # tag basé sur le tag git (ex: v1.2.3)
             type=ref,event=tag
-            # tag basé sur le SHA court
             type=sha
-            # latest sur la branche par défaut
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push (linux/amd64 only)
@@ -59,3 +56,10 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             GIT_SHA=${{ github.sha }}
+
+      - name: Prune old container versions (keep last 3)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ env.PKG_NAME }}
+          package-type: container
+          min-versions-to-keep: 3
