@@ -298,16 +298,16 @@ func discoverIntervalFromEnv(logger *log.Logger) time.Duration {
 }
 
 func debounceDelayFromEnv(logger *log.Logger) time.Duration {
-	const def = 500 * time.Millisecond
+	const def = 100 * time.Millisecond // Réduit à 100ms pour meilleure réactivité
 	val := strings.TrimSpace(os.Getenv("EVENT_DEBOUNCE_DELAY"))
 	if val == "" {
 		return def
 	}
-	if d, err := time.ParseDuration(val); err == nil && d > 0 {
+	if d, err := time.ParseDuration(val); err == nil && d >= 0 {
 		logger.Printf("[config] EVENT_DEBOUNCE_DELAY=%s", d)
 		return d
 	}
-	if n, err := strconv.Atoi(val); err == nil && n > 0 {
+	if n, err := strconv.Atoi(val); err == nil && n >= 0 {
 		d := time.Duration(n) * time.Millisecond
 		logger.Printf("[config] EVENT_DEBOUNCE_DELAY=%s", d)
 		return d
@@ -361,9 +361,9 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		}
 		if strings.HasPrefix(opt, "debounce-delay=") {
 			val := strings.TrimPrefix(opt, "debounce-delay=")
-			if d, err := time.ParseDuration(val); err == nil && d > 0 {
+			if d, err := time.ParseDuration(val); err == nil && d >= 0 {
 				cfg.DebounceDelay = d
-			} else if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			} else if n, err := strconv.Atoi(val); err == nil && n >= 0 {
 				cfg.DebounceDelay = time.Duration(n) * time.Millisecond
 			}
 			continue
@@ -752,7 +752,7 @@ func discoverLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 }
 
 // -----------------------------
-// Boucle d'écoute des events Docker avec debouncing
+// Boucle d'écoute des events Docker avec debouncing intelligent
 // -----------------------------
 
 func shouldTriggerDiscover(ev dockerEvent) bool {
@@ -797,11 +797,15 @@ func shortID(id string) string {
 	return id[:12]
 }
 
-// eventDebouncer gère le debouncing des événements Docker
+// eventDebouncer gère le debouncing intelligent des événements Docker
+// Mode 1 : Premier événement ou isolé (>2x delay) → Trigger immédiat
+// Mode 2 : Rafale d'événements → Debouncing actif
+// Mode 3 : Délai = 0 → Toujours immédiat (pas de debouncing)
 type eventDebouncer struct {
 	mu            sync.Mutex
 	timer         *time.Timer
 	pendingEvents int
+	lastTrigger   time.Time
 	delay         time.Duration
 	callback      func()
 }
@@ -819,6 +823,39 @@ func (d *eventDebouncer) trigger() {
 
 	d.pendingEvents++
 
+	// Mode 3 : Si le delay est 0, on déclenche toujours immédiatement (pas de debouncing)
+	if d.delay == 0 {
+		d.lastTrigger = time.Now()
+		count := d.pendingEvents
+		d.pendingEvents = 0
+		
+		d.mu.Unlock()
+		if count > 0 {
+			d.callback()
+		}
+		d.mu.Lock()
+		return
+	}
+
+	// Mode 1 : Si c'est le premier événement ou si le dernier trigger date de plus de 2x le delay,
+	// on déclenche immédiatement pour éviter les latences
+	timeSinceLastTrigger := time.Since(d.lastTrigger)
+	if d.lastTrigger.IsZero() || timeSinceLastTrigger > d.delay*2 {
+		// Déclencher immédiatement
+		d.lastTrigger = time.Now()
+		count := d.pendingEvents
+		d.pendingEvents = 0
+		
+		// Unlock avant d'appeler le callback
+		d.mu.Unlock()
+		if count > 0 {
+			d.callback()
+		}
+		d.mu.Lock()
+		return
+	}
+
+	// Mode 2 : Rafale d'événements - utiliser le debouncing normal
 	if d.timer != nil {
 		d.timer.Stop()
 	}
@@ -827,6 +864,7 @@ func (d *eventDebouncer) trigger() {
 		d.mu.Lock()
 		count := d.pendingEvents
 		d.pendingEvents = 0
+		d.lastTrigger = time.Now()
 		d.mu.Unlock()
 
 		if count > 0 {
@@ -847,6 +885,16 @@ func (d *eventDebouncer) getPendingCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.pendingEvents
+}
+
+func (d *eventDebouncer) willTriggerImmediately() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.delay == 0 {
+		return true
+	}
+	timeSinceLastTrigger := time.Since(d.lastTrigger)
+	return d.lastTrigger.IsZero() || timeSinceLastTrigger > d.delay*2
 }
 
 func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) {
@@ -955,9 +1003,16 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 					shortID(ev.Actor.ID), ev.Action)
 			}
 
-			logger.Printf("[events] %s -> debouncing discovery (pending=%d)", logDetails, debouncer.getPendingCount()+1)
+			// Déclencher le debouncer avec logging approprié
+			willTriggerImmediately := debouncer.willTriggerImmediately()
+			
+			if willTriggerImmediately {
+				logger.Printf("[events] %s -> triggering discovery immediately", logDetails)
+			} else {
+				logger.Printf("[events] %s -> debouncing discovery (pending=%d, delay=%s)", 
+					logDetails, debouncer.getPendingCount()+1, cfg.DebounceDelay)
+			}
 
-			// Déclencher le debouncer au lieu de discoverOnce() directement
 			debouncer.trigger()
 		}
 
@@ -1369,7 +1424,7 @@ func main() {
 	// Boucles de fond :
 	// - découverte périodique
 	// - watcher du fichier de profiles
-	// - écoute des events Docker (update au fil de l'eau avec debouncing)
+	// - écoute des events Docker (update au fil de l'eau avec debouncing intelligent)
 	go discoverLoop(ctx, cfg, dockerClient, logger)
 	go profileWatcher(ctx, cfg, logger)
 	go eventLoop(ctx, cfg, dockerClient, logger)
