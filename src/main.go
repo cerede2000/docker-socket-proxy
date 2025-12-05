@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,7 +60,7 @@ type ServiceConfig struct {
 	AllowStop    bool
 	AllowRestart bool
 
-	APIRewrite string
+	APIRewrite string // Version d'API à forcer (ex: "1.51")
 }
 
 type ProxyConfig struct {
@@ -67,16 +68,53 @@ type ProxyConfig struct {
 	SocketPath       string
 	DiscoverInterval time.Duration
 	ProfilesFile     string
+	DebounceDelay    time.Duration // Délai de debouncing pour les events
 
 	baseServices map[string]*ServiceConfig // défini par les args (CLI)
+	
+	// Protection concurrentielle pour les données partagées
+	mu           sync.RWMutex
 	services     map[string]*ServiceConfig // effectif (CLI + YAML)
 	ipToRole     map[string]string         // IP -> nom de rôle
 
-	selfNetworks map[string]struct{} // réseaux du conteneur socket-proxy
+	selfNetworks     map[string]struct{} // réseaux du conteneur socket-proxy (immuable après init)
+	selfNetworksHash string              // hash des réseaux pour cache DNS
+}
+
+// Getters thread-safe
+func (c *ProxyConfig) GetService(role string) *ServiceConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.services[role]
+}
+
+func (c *ProxyConfig) GetRole(ip string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ipToRole[ip]
+}
+
+func (c *ProxyConfig) GetIPToRoleSize() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.ipToRole)
+}
+
+// Setters thread-safe
+func (c *ProxyConfig) SetIPToRole(m map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ipToRole = m
+}
+
+func (c *ProxyConfig) SetServices(m map[string]*ServiceConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.services = m
 }
 
 // -----------------------------
-// Structures pour l’API Docker
+// Structures pour l'API Docker
 // -----------------------------
 
 type dockerNetwork struct {
@@ -259,6 +297,25 @@ func discoverIntervalFromEnv(logger *log.Logger) time.Duration {
 	return def
 }
 
+func debounceDelayFromEnv(logger *log.Logger) time.Duration {
+	const def = 500 * time.Millisecond
+	val := strings.TrimSpace(os.Getenv("EVENT_DEBOUNCE_DELAY"))
+	if val == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(val); err == nil && d > 0 {
+		logger.Printf("[config] EVENT_DEBOUNCE_DELAY=%s", d)
+		return d
+	}
+	if n, err := strconv.Atoi(val); err == nil && n > 0 {
+		d := time.Duration(n) * time.Millisecond
+		logger.Printf("[config] EVENT_DEBOUNCE_DELAY=%s", d)
+		return d
+	}
+	logger.Printf("[config] invalid EVENT_DEBOUNCE_DELAY=%q, using %s", val, def)
+	return def
+}
+
 func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 	// Fichier de profils par défaut
 	profilesPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE"))
@@ -270,6 +327,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		Listen:           ":2375",
 		SocketPath:       "/var/run/docker.sock",
 		DiscoverInterval: discoverIntervalFromEnv(logger),
+		DebounceDelay:    debounceDelayFromEnv(logger),
 		ProfilesFile:     profilesPath,
 		baseServices:     make(map[string]*ServiceConfig),
 		services:         make(map[string]*ServiceConfig),
@@ -298,6 +356,15 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 				cfg.DiscoverInterval = d
 			} else if n, err := strconv.Atoi(val); err == nil && n > 0 {
 				cfg.DiscoverInterval = time.Duration(n) * time.Second
+			}
+			continue
+		}
+		if strings.HasPrefix(opt, "debounce-delay=") {
+			val := strings.TrimPrefix(opt, "debounce-delay=")
+			if d, err := time.ParseDuration(val); err == nil && d > 0 {
+				cfg.DebounceDelay = d
+			} else if n, err := strconv.Atoi(val); err == nil && n > 0 {
+				cfg.DebounceDelay = time.Duration(n) * time.Millisecond
 			}
 			continue
 		}
@@ -334,16 +401,16 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 
 	cfg.services = cloneServices(cfg.baseServices)
 
-	logger.Printf("[config] listen=%s socket=%s discover=%s profilesFile=%s",
-		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.ProfilesFile)
+	logger.Printf("[config] listen=%s socket=%s discover=%s debounce=%s profilesFile=%s",
+		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
 	if len(cfg.services) == 0 {
 		logger.Printf("[config] WARNING: aucun profil défini (pas de --home / --portainer / etc.)")
 	} else {
 		for name, svc := range cfg.services {
-			logger.Printf("[config] profil=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v",
+			logger.Printf("[config] profil=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v apirewrite=%q",
 				name, svc.Ping, svc.Version, svc.Info, svc.Containers, svc.Images, svc.Networks,
-				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart)
+				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.APIRewrite)
 		}
 	}
 
@@ -354,7 +421,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 // Parser YAML très simple pour profils
 // -----------------------------
 
-// On retourne map[profil][clé]valeur (valeur brute string pour pouvoir gérer apirewrite: "1.51")
+// On retourne map[profil][clé]valeur (valeur brute string)
 func parseProfilesYAML(content string) (map[string]map[string]string, error) {
 	profiles := make(map[string]map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(content))
@@ -384,7 +451,7 @@ func parseProfilesYAML(content string) (map[string]map[string]string, error) {
 			continue
 		}
 
-		// Ligne de flag : "  ping: true" ou "  apirewrite: 1.51"
+		// Ligne de flag : "  ping: true"
 		if current == "" {
 			continue
 		}
@@ -434,7 +501,6 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	m, err := parseProfilesYAML(string(data))
 	if err != nil {
-		// IMPORTANT : on log et on ignore, on ne casse pas le service
 		return fmt.Errorf("parse profiles yaml: %w", err)
 	}
 
@@ -449,10 +515,10 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 		newServices[role] = s
 	}
 
-	cfg.services = newServices
+	cfg.SetServices(newServices)
 
 	logger.Printf("[profiles] loaded %d profiles from %s", len(newServices), cfg.ProfilesFile)
-	for name, svc := range cfg.services {
+	for name, svc := range newServices {
 		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v apirewrite=%q",
 			name, svc.Ping, svc.Version, svc.Info, svc.Events, svc.Containers,
 			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.APIRewrite)
@@ -506,8 +572,15 @@ func newDockerHTTPClient(socketPath string) *http.Client {
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		},
+		MaxIdleConns:        10,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+		DisableKeepAlives:   false,
 	}
-	return &http.Client{Transport: tr}
+	return &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second,
+	}
 }
 
 func keysOfSet(m map[string]struct{}) []string {
@@ -516,6 +589,23 @@ func keysOfSet(m map[string]struct{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// hashNetworks génère un hash simple des noms de réseaux pour le cache DNS
+func hashNetworks(nets map[string]struct{}) string {
+	if len(nets) == 0 {
+		return ""
+	}
+	keys := keysOfSet(nets)
+	// Tri pour avoir un hash stable
+	for i := 0; i < len(keys)-1; i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	return strings.Join(keys, ",")
 }
 
 func getSelfNetworks(ctx context.Context, client *http.Client, logger *log.Logger) (map[string]struct{}, error) {
@@ -550,6 +640,29 @@ func getSelfNetworks(ctx context.Context, client *http.Client, logger *log.Logge
 	}
 	logger.Printf("[discover] self container=%s networks=%v", hostname, keysOfSet(nets))
 	return nets, nil
+}
+
+// getSelfNetworksWithCache utilise un cache DNS basé sur le hash des réseaux
+func getSelfNetworksWithCache(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) error {
+	nets, err := getSelfNetworks(ctx, client, logger)
+	if err != nil {
+		return err
+	}
+	
+	newHash := hashNetworks(nets)
+	
+	// Si le hash n'a pas changé, on garde le cache
+	if cfg.selfNetworksHash != "" && cfg.selfNetworksHash == newHash {
+		logger.Printf("[discover] self networks unchanged (cache hit)")
+		return nil
+	}
+	
+	// Mise à jour du cache
+	cfg.selfNetworks = nets
+	cfg.selfNetworksHash = newHash
+	logger.Printf("[discover] self networks updated (cache miss)")
+	
+	return nil
 }
 
 func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) error {
@@ -589,7 +702,7 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 		}
 		role := normalizeRoleName(roleLabel)
 
-		svc := cfg.services[role]
+		svc := cfg.GetService(role)
 		if svc == nil {
 			logger.Printf("[discover] container=%s id=%s role=%s -> no matching profile, skipping",
 				name, c.ID[:12], role)
@@ -615,8 +728,8 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 		}
 	}
 
-	cfg.ipToRole = newMap
-	logger.Printf("[discover] ip→role map size=%d", len(newMap))
+	cfg.SetIPToRole(newMap)
+	logger.Printf("[discover] ip→role map size=%d", cfg.GetIPToRoleSize())
 
 	return nil
 }
@@ -639,31 +752,41 @@ func discoverLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 }
 
 // -----------------------------
-// Boucle d'écoute des events Docker
+// Boucle d'écoute des events Docker avec debouncing
 // -----------------------------
 
 func shouldTriggerDiscover(ev dockerEvent) bool {
-	if ev.Type != "container" {
-		return false
+	// Événements de type container
+	if ev.Type == "container" {
+		// Les healthchecks et commandes internes génèrent des exec_* très fréquents
+		if strings.HasPrefix(ev.Action, "exec_") {
+			return false
+		}
+
+		// Les changements de statut de santé ne changent pas l'IP/role
+		if strings.HasPrefix(ev.Action, "health_status") {
+			return false
+		}
+
+		switch ev.Action {
+		case "start", "stop", "die", "destroy", "update", "create", "rename", "pause", "unpause":
+			return true
+		}
 	}
 
-	// Les healthchecks et commandes internes génèrent des exec_* très fréquents
-	if strings.HasPrefix(ev.Action, "exec_") {
-		return false
+	// Événements de type network - gestion des connexions/déconnexions réseau
+	if ev.Type == "network" {
+		switch ev.Action {
+		case "connect", "disconnect":
+			// Pour les événements réseau, on vérifie si un container est concerné
+			if ev.Actor.Attributes != nil {
+				if _, hasContainer := ev.Actor.Attributes["container"]; hasContainer {
+					return true
+				}
+			}
+		}
 	}
 
-	// Les changements de statut de santé ne changent pas l'IP/role
-	if strings.HasPrefix(ev.Action, "health_status") {
-		return false
-	}
-
-	switch ev.Action {
-	case "start", "stop", "die", "destroy", "update", "create", "rename", "pause", "unpause":
-		return true
-	}
-
-	// On ne déclenche plus sur la simple présence de labels ici,
-	// car l'event "update" couvre déjà les changements de labels.
 	return false
 }
 
@@ -674,9 +797,69 @@ func shortID(id string) string {
 	return id[:12]
 }
 
+// eventDebouncer gère le debouncing des événements Docker
+type eventDebouncer struct {
+	mu            sync.Mutex
+	timer         *time.Timer
+	pendingEvents int
+	delay         time.Duration
+	callback      func()
+}
+
+func newEventDebouncer(delay time.Duration, callback func()) *eventDebouncer {
+	return &eventDebouncer{
+		delay:    delay,
+		callback: callback,
+	}
+}
+
+func (d *eventDebouncer) trigger() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.pendingEvents++
+
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+
+	d.timer = time.AfterFunc(d.delay, func() {
+		d.mu.Lock()
+		count := d.pendingEvents
+		d.pendingEvents = 0
+		d.mu.Unlock()
+
+		if count > 0 {
+			d.callback()
+		}
+	})
+}
+
+func (d *eventDebouncer) stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+}
+
+func (d *eventDebouncer) getPendingCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pendingEvents
+}
+
 func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) {
-	// Fallback si pas d'intervalle de découverte (devrait toujours être >0)
 	backoff := 2 * time.Second
+	maxBackoff := 30 * time.Second
+
+	// Créer le debouncer avec callback de découverte
+	debouncer := newEventDebouncer(cfg.DebounceDelay, func() {
+		if err := discoverOnce(ctx, cfg, client, logger); err != nil {
+			logger.Printf("[events] discover error: %v", err)
+		}
+	})
+	defer debouncer.stop()
 
 	for {
 		select {
@@ -686,10 +869,10 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 		default:
 		}
 
-		// On écoute uniquement les events utiles au mapping IP/role
+		// On écoute les events container ET network
 		filterJSON := `{
-		  "type":["container"],
-		  "event":["create","start","stop","die","destroy","update","rename"]
+		  "type":["container","network"],
+		  "event":["create","start","stop","die","destroy","update","rename","connect","disconnect"]
 		}`
 		eventsURL := "http://unix/events?filters=" + url.QueryEscape(filterJSON)
 
@@ -708,6 +891,11 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 			}
 			logger.Printf("[events] request error: %v (retrying in %s)", err, backoff)
 			time.Sleep(backoff)
+			// Augmenter le backoff jusqu'à maxBackoff
+			backoff = backoff * 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 			continue
 		}
 
@@ -715,9 +903,15 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 			logger.Printf("[events] bad status: %d (retrying in %s)", resp.StatusCode, backoff)
 			resp.Body.Close()
 			time.Sleep(backoff)
+			backoff = backoff * 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 			continue
 		}
 
+		// Réinitialiser le backoff en cas de connexion réussie
+		backoff = 2 * time.Second
 		logger.Printf("[events] connected to /events stream")
 
 		dec := json.NewDecoder(resp.Body)
@@ -741,21 +935,30 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 				continue
 			}
 
-			roleAttr := ""
-			if ev.Actor.Attributes != nil {
-				if v, ok := ev.Actor.Attributes["socketproxy.role"]; ok {
-					roleAttr = v
-				} else if v, ok := ev.Actor.Attributes["socketproxy.service"]; ok {
-					roleAttr = v
+			// Logging optimisé
+			var logDetails string
+			if ev.Type == "network" {
+				containerID := ""
+				networkName := ""
+				if ev.Actor.Attributes != nil {
+					if cid, ok := ev.Actor.Attributes["container"]; ok {
+						containerID = shortID(cid)
+					}
+					if nname, ok := ev.Actor.Attributes["name"]; ok {
+						networkName = nname
+					}
 				}
+				logDetails = fmt.Sprintf("type=network action=%s network=%s container=%s",
+					ev.Action, networkName, containerID)
+			} else {
+				logDetails = fmt.Sprintf("type=container id=%s action=%s",
+					shortID(ev.Actor.ID), ev.Action)
 			}
 
-			logger.Printf("[events] container id=%s action=%s roleAttr=%q -> triggering discovery",
-				shortID(ev.Actor.ID), ev.Action, roleAttr)
+			logger.Printf("[events] %s -> debouncing discovery (pending=%d)", logDetails, debouncer.getPendingCount()+1)
 
-			if err := discoverOnce(ctx, cfg, client, logger); err != nil {
-				logger.Printf("[events] discover error: %v", err)
-			}
+			// Déclencher le debouncer au lieu de discoverOnce() directement
+			debouncer.trigger()
 		}
 
 		resp.Body.Close()
@@ -1002,6 +1205,42 @@ func isVersionPath(path string) bool {
 	return trimAPIVersion(path) == "/version"
 }
 
+// rewriteAPIVersion remplace la version d'API dans le path par la version cible
+// Exemples:
+//   - /containers/json -> /v1.51/containers/json
+//   - /v1.40/containers/json -> /v1.51/containers/json
+//   - /v1.43/images/json -> /v1.51/images/json
+func rewriteAPIVersion(path, targetVersion string) string {
+	if targetVersion == "" {
+		return path
+	}
+
+	// Si le path ne commence pas par /v, on ajoute la version
+	if !strings.HasPrefix(path, "/v") {
+		return "/v" + targetVersion + path
+	}
+
+	// Si le path commence par /v, on remplace la version existante
+	// Format: /v1.XX/reste
+	idx := strings.Index(path[2:], "/")
+	if idx == -1 {
+		// Pas de / après la version, path invalide
+		return path
+	}
+	
+	// Vérifier que c'est bien une version (v + chiffres + points)
+	versionPart := path[2 : idx+2]
+	for _, c := range versionPart {
+		if (c < '0' || c > '9') && c != '.' {
+			// Ce n'est pas une version valide, on ne modifie pas
+			return path
+		}
+	}
+
+	// Remplacer la version
+	return "/v" + targetVersion + path[idx+2:]
+}
+
 func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -1018,14 +1257,14 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 			return
 		}
 
-		role := cfg.ipToRole[host]
+		role := cfg.GetRole(host)
 		if role == "" {
 			logger.Printf("[deny] ip=%s role=<none> method=%s path=%s", host, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
-		svc := cfg.services[role]
+		svc := cfg.GetService(role)
 		if svc == nil {
 			logger.Printf("[deny] ip=%s role=%s (unknown) method=%s path=%s", host, role, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -1040,8 +1279,21 @@ func proxyHandler(cfg *ProxyConfig, proxy *httputil.ReverseProxy, logger *log.Lo
 			return
 		}
 
-		logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s",
-			host, role, feature, action, method, path)
+		// Réécriture de la version d'API si configurée
+		originalPath := r.URL.Path
+		if svc.APIRewrite != "" {
+			r.URL.Path = rewriteAPIVersion(r.URL.Path, svc.APIRewrite)
+			if r.URL.Path != originalPath {
+				logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s -> rewritten to=%s (api=%s)",
+					host, role, feature, action, method, originalPath, r.URL.Path, svc.APIRewrite)
+			} else {
+				logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s (api=%s)",
+					host, role, feature, action, method, path, svc.APIRewrite)
+			}
+		} else {
+			logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s",
+				host, role, feature, action, method, path)
+		}
 
 		proxy.ServeHTTP(w, r)
 	})
@@ -1099,11 +1351,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	nets, err := getSelfNetworks(ctx, dockerClient, logger)
-	if err != nil {
+	// Initialisation du cache DNS pour les réseaux
+	if err := getSelfNetworksWithCache(ctx, cfg, dockerClient, logger); err != nil {
 		logger.Printf("[discover] WARNING: cannot get self networks: %v (using all networks)", err)
-	} else {
-		cfg.selfNetworks = nets
 	}
 
 	// Découverte initiale (il se peut qu'il n'y ait encore aucun client)
@@ -1119,7 +1369,7 @@ func main() {
 	// Boucles de fond :
 	// - découverte périodique
 	// - watcher du fichier de profiles
-	// - écoute des events Docker (update au fil de l'eau)
+	// - écoute des events Docker (update au fil de l'eau avec debouncing)
 	go discoverLoop(ctx, cfg, dockerClient, logger)
 	go profileWatcher(ctx, cfg, logger)
 	go eventLoop(ctx, cfg, dockerClient, logger)
@@ -1135,11 +1385,13 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
-	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, profilesFile=%s",
-		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.ProfilesFile)
+	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
+		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
