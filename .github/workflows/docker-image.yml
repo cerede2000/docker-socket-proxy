@@ -3,11 +3,11 @@ name: Build and publish Docker image
 on:
   push:
     branches:
-      - main
+      - go
     tags:
       - 'v*'
     paths:
-      - src/entrypoint.sh
+      - src/*
   workflow_dispatch:
 
 env:
