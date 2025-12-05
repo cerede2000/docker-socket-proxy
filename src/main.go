@@ -1433,19 +1433,39 @@ func main() {
 	// Client avec timeout pour les opérations de découverte
 	discoveryClient := newDockerHTTPClientWithTimeout(cfg.SocketPath)
 
+	// Chargement initial des profiles AVANT tout
+	if err := loadProfilesFromFile(cfg, logger); err != nil {
+		logger.Printf("[profiles] initial load error: %v (using CLI config only)", err)
+	}
+
 	// Initialisation du cache DNS pour les réseaux
 	if err := getSelfNetworksWithCache(ctx, cfg, discoveryClient, logger); err != nil {
 		logger.Printf("[discover] WARNING: cannot get self networks: %v (using all networks)", err)
 	}
 
-	// Découverte initiale (il se peut qu'il n'y ait encore aucun client)
-	if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
-		logger.Printf("[discover] initial error: %v", err)
+	// CRITIQUE : Découverte initiale SYNCHRONE - DOIT réussir avant de démarrer le serveur
+	// Sinon Traefik (qui démarre en même temps) reçoit 403 Forbidden
+	logger.Printf("[main] performing initial discovery (synchronous)...")
+	maxRetries := 5
+	retryDelay := 1 * time.Second
+	discoverySuccess := false
+	
+	for i := 0; i < maxRetries; i++ {
+		if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
+			logger.Printf("[discover] initial discovery attempt %d/%d failed: %v", i+1, maxRetries, err)
+			if i < maxRetries-1 {
+				time.Sleep(retryDelay)
+				retryDelay = retryDelay * 2 // Backoff
+			}
+		} else {
+			discoverySuccess = true
+			logger.Printf("[main] initial discovery successful - found %d containers", cfg.GetIPToRoleSize())
+			break
+		}
 	}
-
-	// Chargement initial des profiles
-	if err := loadProfilesFromFile(cfg, logger); err != nil {
-		logger.Printf("[profiles] initial load error: %v (using CLI config only)", err)
+	
+	if !discoverySuccess {
+		logger.Printf("[main] WARNING: initial discovery failed after %d attempts - starting anyway", maxRetries)
 	}
 
 	// Boucles de fond :
