@@ -190,16 +190,10 @@ func anyRightsSet(s *ServiceConfig) bool {
 }
 
 func applyDefaultProfileFlags(s *ServiceConfig, role string) {
-	if anyRightsSet(s) {
-		return
-	}
-	// Profil par défaut de lecture
-	s.Ping = true
-	s.Version = true
-	s.Info = true
-	s.Containers = true
-	s.Images = true
-	s.Networks = true
+	// AUCUN DROIT PAR DÉFAUT
+	// Les droits doivent être explicitement définis dans profiles.yml ou via CLI
+	// Principe du moindre privilège : deny by default
+	return
 }
 
 func applyFlagValue(s *ServiceConfig, flag, value string) {
