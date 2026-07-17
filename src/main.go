@@ -71,7 +71,19 @@ type ServiceConfig struct {
 	ContainerScope    string
 	AllowedContainers map[string]struct{}
 	BlockedContainers map[string]struct{}
+	// ContainerRules ajoute des exceptions nominatives à la portée. Une règle
+	// "deny" masque totalement la cible, tandis que "readonly" ne permet que
+	// les API de consultation explicitement autorisées.
+	ContainerRules map[string]ContainerAccess
 }
+
+type ContainerAccess string
+
+const (
+	containerAccessFull     ContainerAccess = "full"
+	containerAccessReadOnly ContainerAccess = "readonly"
+	containerAccessDeny     ContainerAccess = "deny"
+)
 
 type ProxyConfig struct {
 	Listen           string
@@ -260,6 +272,7 @@ func ensureService(m map[string]*ServiceConfig, role string) *ServiceConfig {
 		ContainerScope:    "all",
 		AllowedContainers: make(map[string]struct{}),
 		BlockedContainers: make(map[string]struct{}),
+		ContainerRules:    make(map[string]ContainerAccess),
 	}
 	m[role] = s
 	return s
@@ -360,6 +373,20 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 				s.BlockedContainers[name] = struct{}{}
 			}
 		}
+	case "container_rule":
+		parts := strings.SplitN(value, ":", 2)
+		if len(parts) != 2 {
+			return
+		}
+		name := normalizeContainerRef(parts[0])
+		access := ContainerAccess(strings.ToLower(strings.TrimSpace(parts[1])))
+		if name == "" || (access != containerAccessDeny && access != containerAccessReadOnly) {
+			return
+		}
+		if s.ContainerRules == nil {
+			s.ContainerRules = make(map[string]ContainerAccess)
+		}
+		s.ContainerRules[name] = access
 	}
 }
 
@@ -369,6 +396,7 @@ func cloneServices(in map[string]*ServiceConfig) map[string]*ServiceConfig {
 		c := *v
 		c.AllowedContainers = cloneStringSet(v.AllowedContainers)
 		c.BlockedContainers = cloneStringSet(v.BlockedContainers)
+		c.ContainerRules = cloneContainerRules(v.ContainerRules)
 		out[k] = &c
 	}
 	return out
@@ -382,29 +410,47 @@ func cloneStringSet(in map[string]struct{}) map[string]struct{} {
 	return out
 }
 
-func (s *ServiceConfig) HasContainerScope() bool {
-	return strings.ToLower(s.ContainerScope) != "" && strings.ToLower(s.ContainerScope) != "all"
+func cloneContainerRules(in map[string]ContainerAccess) map[string]ContainerAccess {
+	out := make(map[string]ContainerAccess, len(in))
+	for name, access := range in {
+		out[name] = access
+	}
+	return out
 }
 
-func (s *ServiceConfig) AllowsContainer(meta dockerContainerMeta) bool {
+func (s *ServiceConfig) HasContainerScope() bool {
+	return (strings.ToLower(s.ContainerScope) != "" && strings.ToLower(s.ContainerScope) != "all") || len(s.ContainerRules) > 0
+}
+
+func (s *ServiceConfig) ContainerAccess(meta dockerContainerMeta) ContainerAccess {
 	name := normalizeContainerRef(meta.Name)
 	if name == "" {
-		return false
+		return containerAccessDeny
+	}
+	if access, ok := s.ContainerRules[name]; ok {
+		return access
 	}
 	if _, blocked := s.BlockedContainers[name]; blocked {
-		return false
+		return containerAccessDeny
 	}
 	switch strings.ToLower(s.ContainerScope) {
 	case "", "all":
-		return true
+		return containerAccessFull
 	case "allowlist":
 		_, allowed := s.AllowedContainers[name]
-		return allowed
+		if allowed {
+			return containerAccessFull
+		}
+		return containerAccessDeny
 	case "blacklist":
-		return true
+		return containerAccessFull
 	default:
-		return false
+		return containerAccessDeny
 	}
+}
+
+func (s *ServiceConfig) AllowsContainer(meta dockerContainerMeta) bool {
+	return s.ContainerAccess(meta) != containerAccessDeny
 }
 
 func validateContainerScope(s *ServiceConfig) error {
@@ -428,6 +474,17 @@ func validateContainerScope(s *ServiceConfig) error {
 		}
 	default:
 		return fmt.Errorf("invalid container_scope=%q (expected all, allowlist or blacklist)", s.ContainerScope)
+	}
+	for name, access := range s.ContainerRules {
+		if normalizeContainerRef(name) == "" {
+			return fmt.Errorf("container_rules contains an empty name")
+		}
+		if access != containerAccessDeny && access != containerAccessReadOnly {
+			return fmt.Errorf("container_rules[%q] has invalid access %q (expected deny or readonly)", name, access)
+		}
+		if _, blocked := s.BlockedContainers[name]; blocked {
+			return fmt.Errorf("container %q cannot be both blocked_containers and container_rules", name)
+		}
 	}
 	return nil
 }
@@ -583,6 +640,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 			svc.ContainerScope = "allowlist"
 			svc.AllowedContainers = make(map[string]struct{})
 			svc.BlockedContainers = make(map[string]struct{})
+			svc.ContainerRules = make(map[string]ContainerAccess)
 		}
 	}
 
@@ -593,9 +651,9 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		logger.Printf("[config] WARNING: aucun profil défini (pas de --home / --portainer / etc.)")
 	} else {
 		for name, svc := range cfg.services {
-			logger.Printf("[config] profil=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v apirewrite=%q",
+			logger.Printf("[config] profil=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v scope=%s rules=%d apirewrite=%q",
 				name, svc.Ping, svc.Version, svc.Info, svc.Containers, svc.Images, svc.Networks,
-				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.APIRewrite)
+				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.ContainerScope, len(svc.ContainerRules), svc.APIRewrite)
 		}
 	}
 
@@ -612,7 +670,7 @@ var knownProfileKeys = map[string]struct{}{
 	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
 	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
 	"post": {}, "allow_start": {}, "allow_stop": {}, "allow_restart": {}, "allow_restarts": {},
-	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {},
+	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},
 }
 
 func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
@@ -644,6 +702,33 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 						return nil, fmt.Errorf("profile %q: %s must contain non-empty names", role, key)
 					}
 					applyFlagValue(svc, key, name)
+				}
+			case "container_rules":
+				items, ok := value.([]any)
+				if !ok {
+					return nil, fmt.Errorf("profile %q: container_rules must be a YAML list", role)
+				}
+				for _, item := range items {
+					rule, ok := item.(map[string]any)
+					if !ok || len(rule) != 2 {
+						return nil, fmt.Errorf("profile %q: each container_rules entry must contain name and access", role)
+					}
+					nameValue, hasName := rule["name"]
+					accessValue, hasAccess := rule["access"]
+					name, nameOK := nameValue.(string)
+					access, accessOK := accessValue.(string)
+					if !hasName || !hasAccess || !nameOK || !accessOK || normalizeContainerRef(name) == "" {
+						return nil, fmt.Errorf("profile %q: each container_rules entry must contain string name and access", role)
+					}
+					normalizedName := normalizeContainerRef(name)
+					normalizedAccess := ContainerAccess(strings.ToLower(strings.TrimSpace(access)))
+					if normalizedAccess != containerAccessDeny && normalizedAccess != containerAccessReadOnly {
+						return nil, fmt.Errorf("profile %q: invalid container rule for %q (access must be deny or readonly)", role, name)
+					}
+					if _, exists := svc.ContainerRules[normalizedName]; exists {
+						return nil, fmt.Errorf("profile %q: duplicate container rule for %q", role, name)
+					}
+					svc.ContainerRules[normalizedName] = normalizedAccess
 				}
 			default:
 				switch typed := value.(type) {
@@ -690,9 +775,9 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	logger.Printf("[profiles] loaded %d profiles from %s", len(newServices), cfg.ProfilesFile)
 	for name, svc := range newServices {
-		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v scope=%s allowed=%d blocked=%d apirewrite=%q",
+		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v scope=%s allowed=%d blocked=%d rules=%d apirewrite=%q",
 			name, svc.Ping, svc.Version, svc.Info, svc.Events, svc.Containers,
-			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.ContainerScope, len(svc.AllowedContainers), len(svc.BlockedContainers), svc.APIRewrite)
+			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.ContainerScope, len(svc.AllowedContainers), len(svc.BlockedContainers), len(svc.ContainerRules), svc.APIRewrite)
 	}
 
 	return nil
@@ -1643,15 +1728,39 @@ func isNetworkContainerOperation(path string) bool {
 	return strings.HasSuffix(p, "/connect") || strings.HasSuffix(p, "/disconnect")
 }
 
-func authorizeContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client, service *ServiceConfig, ref string) (dockerContainerMeta, error) {
+func authorizeContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client, service *ServiceConfig, ref string) (dockerContainerMeta, ContainerAccess, error) {
 	meta, err := resolveContainer(ctx, cfg, client, ref)
 	if err != nil {
-		return dockerContainerMeta{}, err
+		return dockerContainerMeta{}, containerAccessDeny, err
 	}
-	if !service.AllowsContainer(meta) {
-		return dockerContainerMeta{}, fmt.Errorf("container %q is outside profile scope", meta.Name)
+	access := service.ContainerAccess(meta)
+	if access == containerAccessDeny {
+		return dockerContainerMeta{}, access, fmt.Errorf("container %q is outside profile scope", meta.Name)
 	}
-	return meta, nil
+	return meta, access, nil
+}
+
+func isReadOnlyContainerRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	parts := strings.Split(strings.Trim(pathWithoutAPIVersion(r.URL.Path), "/"), "/")
+	if len(parts) != 3 || parts[0] != "containers" || parts[1] == "" {
+		return false
+	}
+	switch parts[2] {
+	case "json", "logs", "stats", "top", "changes":
+		return true
+	default:
+		return false
+	}
+}
+
+func requireWritableContainer(access ContainerAccess, meta dockerContainerMeta) error {
+	if access == containerAccessReadOnly {
+		return fmt.Errorf("container %q is read-only for this profile", meta.Name)
+	}
+	return nil
 }
 
 func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.Client, service *ServiceConfig, feature string, r *http.Request) (*responseFilterContext, error) {
@@ -1662,9 +1771,12 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 	switch feature {
 	case "containers":
 		if ref, ok := directContainerReference(r.URL.Path); ok {
-			meta, err := authorizeContainer(ctx, cfg, client, service, ref)
+			meta, access, err := authorizeContainer(ctx, cfg, client, service, ref)
 			if err != nil {
 				return nil, err
+			}
+			if access == containerAccessReadOnly && !isReadOnlyContainerRequest(r) {
+				return nil, fmt.Errorf("container %q only permits read-only API requests", meta.Name)
 			}
 			r.URL.Path = rewriteContainerReference(r.URL.Path, meta.ID)
 			return nil, nil
@@ -1685,8 +1797,11 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 		if err != nil {
 			return nil, err
 		}
-		if !service.AllowsContainer(meta) {
+		if service.ContainerAccess(meta) == containerAccessDeny {
 			return nil, fmt.Errorf("container %q is outside profile scope", meta.Name)
+		}
+		if err := requireWritableContainer(service.ContainerAccess(meta), meta); err != nil {
+			return nil, err
 		}
 	case "events":
 		return &responseFilterContext{service: service, kind: filterEvents}, nil
@@ -1696,13 +1811,21 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 			if err != nil {
 				return nil, err
 			}
-			if _, err := authorizeContainer(ctx, cfg, client, service, ref); err != nil {
+			meta, access, err := authorizeContainer(ctx, cfg, client, service, ref)
+			if err != nil {
+				return nil, err
+			}
+			if err := requireWritableContainer(access, meta); err != nil {
 				return nil, err
 			}
 		}
 	case "commit":
 		if ref := r.URL.Query().Get("container"); ref != "" {
-			if _, err := authorizeContainer(ctx, cfg, client, service, ref); err != nil {
+			meta, access, err := authorizeContainer(ctx, cfg, client, service, ref)
+			if err != nil {
+				return nil, err
+			}
+			if err := requireWritableContainer(access, meta); err != nil {
 				return nil, err
 			}
 		}

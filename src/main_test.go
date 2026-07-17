@@ -113,7 +113,7 @@ func TestRewriteAPIVersion(t *testing.T) {
 }
 
 func TestParseProfilesYAML(t *testing.T) {
-	profiles, err := parseProfilesYAML("home:\n  ping: true\n  containers: false\n  container_scope: allowlist\n  allowed_containers:\n    - traefik\n")
+	profiles, err := parseProfilesYAML("home:\n  ping: true\n  containers: false\n  container_scope: allowlist\n  allowed_containers:\n    - traefik\n  container_rules:\n    - name: dockman\n      access: readonly\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +124,22 @@ func TestParseProfilesYAML(t *testing.T) {
 	if _, ok := home.AllowedContainers["traefik"]; !ok {
 		t.Fatalf("traefik missing from allowlist: %#v", home.AllowedContainers)
 	}
+	if home.ContainerRules["dockman"] != containerAccessReadOnly {
+		t.Fatalf("dockman rule = %q, want readonly", home.ContainerRules["dockman"])
+	}
 }
 
 func TestParseProfilesYAMLRejectsInvalidScope(t *testing.T) {
 	_, err := parseProfilesYAML("manager:\n  container_scope: blacklist\n  allowed_containers:\n    - traefik\n")
 	if err == nil {
 		t.Fatal("invalid blacklist profile was accepted")
+	}
+}
+
+func TestParseProfilesYAMLRejectsInvalidContainerRule(t *testing.T) {
+	_, err := parseProfilesYAML("manager:\n  container_rules:\n    - name: dockman\n      access: full\n")
+	if err == nil {
+		t.Fatal("invalid container rule was accepted")
 	}
 }
 
@@ -160,6 +170,16 @@ func TestContainerScopes(t *testing.T) {
 	}
 	if !blacklist.AllowsContainer(traefik) || blacklist.AllowsContainer(proxy) {
 		t.Fatal("blacklist did not exclude the protected container")
+	}
+
+	rules := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+		ContainerRules:    map[string]ContainerAccess{"traefik": containerAccessReadOnly},
+	}
+	if rules.ContainerAccess(traefik) != containerAccessReadOnly || rules.ContainerAccess(proxy) != containerAccessDeny {
+		t.Fatal("container rules did not override the expected access levels")
 	}
 }
 
@@ -225,6 +245,47 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 	}
 }
 
+func TestEnforceContainerScopeAllowsOnlySafeReadOnlyRoutes(t *testing.T) {
+	cfg := &ProxyConfig{
+		containersByRef: buildContainerIndex([]dockerContainerSummary{{
+			ID:    "0123456789abcdef",
+			Names: []string{"/dockman"},
+		}}),
+		execToContainer: make(map[string]string),
+	}
+	service := &ServiceConfig{
+		ContainerScope:    "all",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{},
+		ContainerRules:    map[string]ContainerAccess{"dockman": containerAccessReadOnly},
+	}
+	for _, path := range []string{"/containers/dockman/json", "/containers/dockman/logs", "/containers/dockman/stats", "/containers/dockman/top"} {
+		req, err := http.NewRequest(http.MethodGet, "http://proxy"+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err != nil {
+			t.Fatalf("read-only request %s was denied: %v", path, err)
+		}
+	}
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/containers/dockman/restart"},
+		{http.MethodPost, "/containers/dockman/exec"},
+		{http.MethodGet, "/containers/dockman/archive"},
+	} {
+		req, err := http.NewRequest(tc.method, "http://proxy"+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err == nil {
+			t.Fatalf("unsafe read-only request %s %s was allowed", tc.method, tc.path)
+		}
+	}
+}
+
 func TestFilterContainerListResponse(t *testing.T) {
 	service := &ServiceConfig{
 		ContainerScope:    "blacklist",
@@ -245,6 +306,34 @@ func TestFilterContainerListResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(body), "docker-socket-proxy") || !strings.Contains(string(body), "traefik") {
+		t.Fatalf("unexpected filtered list: %s", body)
+	}
+}
+
+func TestFilterContainerListKeepsReadOnlyContainer(t *testing.T) {
+	service := &ServiceConfig{
+		ContainerScope:    "all",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{},
+		ContainerRules: map[string]ContainerAccess{
+			"dockman":             containerAccessReadOnly,
+			"docker-socket-proxy": containerAccessDeny,
+		},
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`[
+  {"Id":"a","Names":["/dockman"]},
+  {"Id":"b","Names":["/docker-socket-proxy"]}
+]`)),
+	}
+	filterContainerListResponse(resp, nil, service)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "dockman") || strings.Contains(string(body), "docker-socket-proxy") {
 		t.Fatalf("unexpected filtered list: %s", body)
 	}
 }

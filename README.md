@@ -25,9 +25,29 @@ Les options `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--de
 
 Le compte effectif doit pouvoir lire le socket Docker. Le fichier Compose fournit un exemple avec un UID/GID hôte explicite ; adaptez `user` au propriétaire et au groupe du socket de votre machine.
 
-## Portée des conteneurs
+## Portée et règles par conteneur
 
-Par défaut, un profil conserve ses droits sur tous les conteneurs. `container_scope` ajoute une restriction optionnelle :
+Les noms de conteneurs sont exacts et correspondent au nom Docker sans le préfixe `/` (par exemple `container_name: dockman` devient `dockman`). La portée détermine l'accès normal ; `container_rules` ajoute des exceptions par nom.
+
+### Tous les conteneurs — comportement historique
+
+`all` est la valeur par défaut. Le profil conserve les droits Docker qui lui sont accordés sur tous les conteneurs.
+
+```yaml
+portainer:
+  containers: true
+  images: true
+  networks: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: all
+```
+
+### Allowlist — agir seulement sur certaines cibles
+
+Les conteneurs absents de `allowed_containers` sont invisibles et inaccessibles.
 
 ```yaml
 traefik-manager:
@@ -35,19 +55,67 @@ traefik-manager:
   post: true
   allow_start: true
   allow_stop: true
+  allow_restart: true
   container_scope: allowlist
   allowed_containers:
     - traefik
+```
 
-operator:
+### Blacklist — profil large avec cibles masquées
+
+Les conteneurs de `blocked_containers` sont invisibles et toute opération les visant est refusée.
+
+```yaml
+dockhand:
   containers: true
   events: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
   container_scope: blacklist
   blocked_containers:
     - docker-socket-proxy
 ```
 
-Valeurs possibles : `all` (comportement historique), `allowlist` et `blacklist`. Les noms sont exacts et correspondent au nom Docker sans le préfixe `/`. Les opérations ciblées, les listes de conteneurs et les événements sont filtrés. Les opérations globales de conteneurs (`create` et `prune`) sont refusées pour un profil ayant une portée active.
+### Règle `deny` — masquer une cible, quelle que soit la portée
+
+`container_rules` est prioritaire sur `container_scope`. Cette variante est utile avec `all`, ou pour rendre la règle plus explicite.
+
+```yaml
+operator:
+  containers: true
+  container_scope: all
+  container_rules:
+    - name: docker-socket-proxy
+      access: deny
+```
+
+### Règle `readonly` — voir sans pouvoir agir
+
+Une cible en lecture seule reste visible dans les listes et événements. Seules les API de consultation suivantes sont admises : `inspect`, `logs`, `stats`, `top` et `changes`. Les opérations de modification, les exec, les archives et l'attach sont refusés.
+
+```yaml
+dockhand:
+  containers: true
+  events: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: blacklist
+  blocked_containers:
+    - docker-socket-proxy
+  container_rules:
+    - name: dockman
+      access: readonly
+```
+
+Dans cet exemple, Dockhand peut consulter les logs et statistiques de `dockman`, mais pas le redémarrer ; `docker-socket-proxy` reste entièrement masqué. Les conteneurs non cités conservent les droits du profil.
+
+Une même cible ne peut pas figurer à la fois dans `blocked_containers` et `container_rules`. Les valeurs autorisées pour `access` sont exclusivement `deny` et `readonly`.
+
+Pour toute portée active (`allowlist`, `blacklist`, ou au moins une `container_rules`), les opérations globales de conteneurs (`create` et `prune`) sont refusées. Les règles sont appliquées aussi aux listes de conteneurs et au flux d'événements.
 
 ## Développement
 
