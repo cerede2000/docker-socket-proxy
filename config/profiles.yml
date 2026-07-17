@@ -3,6 +3,18 @@ home:
   version: true
   containers: true
 
+# `all` est le comportement historique : ce profil dispose de ses droits sur
+# tous les conteneurs.
+administrator:
+  ping: true
+  version: true
+  containers: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: all
+
 portainer:
   ping: true
   version: true
@@ -19,3 +31,67 @@ portainer:
   allow_start: true
   allow_stop: true
   allow_restart: true
+
+# Exemple de profil restreint : le rôle conserve ses droits Docker, mais ne peut
+# agir que sur le conteneur nommé traefik.
+traefik-manager:
+  ping: true
+  version: true
+  containers: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: allowlist
+  allowed_containers:
+    - traefik
+
+# Exemple de profil large qui exclut tout de même une cible critique.
+operator:
+  ping: true
+  version: true
+  containers: true
+  events: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: blacklist
+  blocked_containers:
+    - docker-socket-proxy
+
+# Une règle `deny` masque la cible même lorsque le scope est `all`.
+auditor:
+  ping: true
+  version: true
+  containers: true
+  container_scope: all
+  container_rules:
+    - name: docker-socket-proxy
+      access: deny
+
+# Cas mixte : dockhand conserve ses droits sur les autres conteneurs, peut voir
+# dockman (logs, stats, inspect, top et changes) mais ne peut pas le modifier,
+# et ne voit pas du tout docker-socket-proxy.
+dockhand:
+  ping: true
+  version: true
+  info: true
+  events: true
+  containers: true
+  images: true
+  build: true
+  networks: true
+  volumes: true
+  exec: true
+  system: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: blacklist
+  blocked_containers:
+    - docker-socket-proxy
+  container_rules:
+    - name: dockman
+      access: readonly
