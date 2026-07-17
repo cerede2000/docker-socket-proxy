@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -71,11 +72,11 @@ type ProxyConfig struct {
 	DebounceDelay    time.Duration // Délai de debouncing pour les events
 
 	baseServices map[string]*ServiceConfig // défini par les args (CLI)
-	
+
 	// Protection concurrentielle pour les données partagées
-	mu           sync.RWMutex
-	services     map[string]*ServiceConfig // effectif (CLI + YAML)
-	ipToRole     map[string]string         // IP -> nom de rôle
+	mu       sync.RWMutex
+	services map[string]*ServiceConfig // effectif (CLI + YAML)
+	ipToRole map[string]string         // IP -> nom de rôle
 
 	selfNetworks     map[string]struct{} // réseaux du conteneur socket-proxy (immuable après init)
 	selfNetworksHash string              // hash des réseaux pour cache DNS
@@ -317,9 +318,26 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		profilesPath = "/config/profiles.yml"
 	}
 
+	listen := ":2375"
+	if port := strings.TrimSpace(os.Getenv("PROXY_PORT")); port != "" {
+		if n, err := strconv.Atoi(port); err == nil && n > 0 && n <= 65535 {
+			listen = ":" + port
+		} else {
+			logger.Printf("[config] invalid PROXY_PORT=%q, using 2375", port)
+		}
+	}
+	if envListen := strings.TrimSpace(os.Getenv("PROXY_LISTEN")); envListen != "" {
+		listen = envListen
+	}
+
+	socketPath := strings.TrimSpace(os.Getenv("DOCKER_SOCKET_PATH"))
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
+
 	cfg := &ProxyConfig{
-		Listen:           ":2375",
-		SocketPath:       "/var/run/docker.sock",
+		Listen:           listen,
+		SocketPath:       socketPath,
 		DiscoverInterval: discoverIntervalFromEnv(logger),
 		DebounceDelay:    debounceDelayFromEnv(logger),
 		ProfilesFile:     profilesPath,
@@ -566,17 +584,17 @@ func newDockerHTTPClient(socketPath string) *http.Client {
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		},
-		MaxIdleConns:        10,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  false,
-		DisableKeepAlives:   false,
+		MaxIdleConns:       10,
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: false,
+		DisableKeepAlives:  false,
 		// Pas de ResponseHeaderTimeout pour supporter /events
 		ResponseHeaderTimeout: 0,
 	}
 	return &http.Client{
 		Transport: tr,
 		// Timeout à 0 pour supporter les connexions longues (/events)
-		Timeout:   0,
+		Timeout: 0,
 	}
 }
 
@@ -664,20 +682,20 @@ func getSelfNetworksWithCache(ctx context.Context, cfg *ProxyConfig, client *htt
 	if err != nil {
 		return err
 	}
-	
+
 	newHash := hashNetworks(nets)
-	
+
 	// Si le hash n'a pas changé, on garde le cache
 	if cfg.selfNetworksHash != "" && cfg.selfNetworksHash == newHash {
 		logger.Printf("[discover] self networks unchanged (cache hit)")
 		return nil
 	}
-	
+
 	// Mise à jour du cache
 	cfg.selfNetworks = nets
 	cfg.selfNetworksHash = newHash
 	logger.Printf("[discover] self networks updated (cache miss)")
-	
+
 	return nil
 }
 
@@ -844,7 +862,7 @@ func (d *eventDebouncer) trigger() {
 		d.lastTrigger = time.Now()
 		count := d.pendingEvents
 		d.pendingEvents = 0
-		
+
 		d.mu.Unlock()
 		if count > 0 {
 			d.callback()
@@ -861,7 +879,7 @@ func (d *eventDebouncer) trigger() {
 		d.lastTrigger = time.Now()
 		count := d.pendingEvents
 		d.pendingEvents = 0
-		
+
 		// Unlock avant d'appeler le callback
 		d.mu.Unlock()
 		if count > 0 {
@@ -1021,11 +1039,11 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 
 			// Déclencher le debouncer avec logging approprié
 			willTriggerImmediately := debouncer.willTriggerImmediately()
-			
+
 			if willTriggerImmediately {
 				logger.Printf("[events] %s -> triggering discovery immediately", logDetails)
 			} else {
-				logger.Printf("[events] %s -> debouncing discovery (pending=%d, delay=%s)", 
+				logger.Printf("[events] %s -> debouncing discovery (pending=%d, delay=%s)",
 					logDetails, debouncer.getPendingCount()+1, cfg.DebounceDelay)
 			}
 
@@ -1143,8 +1161,12 @@ func classifyPath(path string) (feature string, action string) {
 }
 
 func (s *ServiceConfig) Allow(feature, method, action string) bool {
+	isRead := method == http.MethodGet || method == http.MethodHead
 	isWrite := method == http.MethodPost || method == http.MethodPut ||
 		method == http.MethodPatch || method == http.MethodDelete
+	if !isRead && !isWrite {
+		return false
+	}
 
 	switch feature {
 	case "ping":
@@ -1295,10 +1317,18 @@ func rewriteAPIVersion(path, targetVersion string) string {
 	// Format: /v1.XX/reste
 	idx := strings.Index(path[2:], "/")
 	if idx == -1 {
-		// Pas de / après la version, path invalide
+		// Un endpoint tel que /version commence par "/v" sans être un préfixe
+		// d'API. Dans ce cas, il faut ajouter la version comme pour tout autre
+		// endpoint non versionné.
+		versionPart := path[2:]
+		for _, c := range versionPart {
+			if (c < '0' || c > '9') && c != '.' {
+				return "/v" + targetVersion + path
+			}
+		}
 		return path
 	}
-	
+
 	// Vérifier que c'est bien une version (v + chiffres + points)
 	versionPart := path[2 : idx+2]
 	for _, c := range versionPart {
@@ -1380,7 +1410,12 @@ func runHealthcheck() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:2375/version", nil)
+	port := strings.TrimSpace(os.Getenv("PROXY_PORT"))
+	if n, err := strconv.Atoi(port); err != nil || n <= 0 || n > 65535 {
+		port = "2375"
+	}
+	healthURL := "http://127.0.0.1:" + port + "/version"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		logger.Printf("[health] build request error: %v", err)
 		return 1
@@ -1418,12 +1453,12 @@ func main() {
 
 	cfg := parseConfig(os.Args[1:], logger)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Client pour le proxy (sans timeout pour supporter /events)
 	proxyClient := newDockerHTTPClient(cfg.SocketPath)
-	
+
 	// Client avec timeout pour les opérations de découverte
 	discoveryClient := newDockerHTTPClientWithTimeout(cfg.SocketPath)
 
@@ -1443,7 +1478,7 @@ func main() {
 	maxRetries := 5
 	retryDelay := 1 * time.Second
 	discoverySuccess := false
-	
+
 	for i := 0; i < maxRetries; i++ {
 		if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
 			logger.Printf("[discover] initial discovery attempt %d/%d failed: %v", i+1, maxRetries, err)
@@ -1457,7 +1492,7 @@ func main() {
 			break
 		}
 	}
-	
+
 	if !discoverySuccess {
 		logger.Printf("[main] WARNING: initial discovery failed after %d attempts - starting anyway", maxRetries)
 	}
@@ -1484,9 +1519,9 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		// WriteTimeout doit être 0 pour supporter les connexions longues comme /events
 		// Traefik et autres clients maintiennent /events ouvert indéfiniment
-		WriteTimeout:      0,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MB
+		WriteTimeout:   0,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
 	}
 
 	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",

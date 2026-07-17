@@ -4,6 +4,10 @@ services:
     container_name: docker-socket-proxy
     user: "107:108"
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     tmpfs:
       - /tmp
     volumes:
@@ -16,3 +20,7 @@ services:
       - --dockerproxy-watchtower.info=1
       - --dockerproxy-watchtower.events=1
     restart: unless-stopped
+
+networks:
+  traefikfront:
+    external: true
