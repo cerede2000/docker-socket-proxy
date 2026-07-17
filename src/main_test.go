@@ -356,7 +356,7 @@ func TestFilterEventsPreservesDockerEventFields(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
-		Body: io.NopCloser(strings.NewReader("{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"allowed\",\"Attributes\":{\"name\":\"dockman\"}},\"scope\":\"local\",\"time\":123,\"timeNano\":123456789000,\"FutureDockerField\":\"preserved\"}\n{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"denied\",\"Attributes\":{\"name\":\"docker-socket-proxy\"}},\"timeNano\":123456789001}\n")),
+		Body:       io.NopCloser(strings.NewReader("{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"allowed\",\"Attributes\":{\"name\":\"dockman\"}},\"scope\":\"local\",\"time\":123,\"timeNano\":123456789000,\"FutureDockerField\":\"preserved\"}\n{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"denied\",\"Attributes\":{\"name\":\"docker-socket-proxy\"}},\"timeNano\":123456789001}\n")),
 	}
 	filterEventsResponse(resp, cfg, service)
 	body, err := io.ReadAll(resp.Body)
