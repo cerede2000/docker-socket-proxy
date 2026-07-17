@@ -1853,8 +1853,13 @@ func filterContainerListResponse(resp *http.Response, cfg *ProxyConfig, service 
 		}
 		first := true
 		for decoder.More() {
+			var raw json.RawMessage
+			if err := decoder.Decode(&raw); err != nil {
+				_ = writer.CloseWithError(fmt.Errorf("decode Docker container entry: %w", err))
+				return
+			}
 			var container dockerContainerSummary
-			if err := decoder.Decode(&container); err != nil {
+			if err := json.Unmarshal(raw, &container); err != nil {
 				_ = writer.CloseWithError(fmt.Errorf("decode Docker container entry: %w", err))
 				return
 			}
@@ -1862,18 +1867,13 @@ func filterContainerListResponse(resp *http.Response, cfg *ProxyConfig, service 
 			if !service.AllowsContainer(meta) {
 				continue
 			}
-			encoded, err := json.Marshal(container)
-			if err != nil {
-				_ = writer.CloseWithError(err)
-				return
-			}
 			if !first {
 				if _, err := writer.Write([]byte(",")); err != nil {
 					return
 				}
 			}
 			first = false
-			if _, err := writer.Write(encoded); err != nil {
+			if _, err := writer.Write(raw); err != nil {
 				return
 			}
 		}
@@ -1896,13 +1896,17 @@ func filterEventsResponse(resp *http.Response, cfg *ProxyConfig, service *Servic
 		defer originalBody.Close()
 		defer writer.Close()
 		decoder := json.NewDecoder(originalBody)
-		encoder := json.NewEncoder(writer)
 		for {
-			var event dockerEvent
-			if err := decoder.Decode(&event); err != nil {
+			var raw json.RawMessage
+			if err := decoder.Decode(&raw); err != nil {
 				if err != io.EOF {
 					_ = writer.CloseWithError(fmt.Errorf("decode Docker event: %w", err))
 				}
+				return
+			}
+			var event dockerEvent
+			if err := json.Unmarshal(raw, &event); err != nil {
+				_ = writer.CloseWithError(fmt.Errorf("decode Docker event: %w", err))
 				return
 			}
 			if event.Type != "container" {
@@ -1912,7 +1916,10 @@ func filterEventsResponse(resp *http.Response, cfg *ProxyConfig, service *Servic
 			if !ok || !service.AllowsContainer(meta) {
 				continue
 			}
-			if err := encoder.Encode(event); err != nil {
+			if _, err := writer.Write(raw); err != nil {
+				return
+			}
+			if _, err := writer.Write([]byte("\n")); err != nil {
 				return
 			}
 		}

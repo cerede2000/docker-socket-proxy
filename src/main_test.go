@@ -324,7 +324,7 @@ func TestFilterContainerListKeepsReadOnlyContainer(t *testing.T) {
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
 		Body: io.NopCloser(strings.NewReader(`[
-  {"Id":"a","Names":["/dockman"]},
+  {"Id":"a","Names":["/dockman"],"Image":"dockman:latest","FutureDockerField":"preserved"},
   {"Id":"b","Names":["/docker-socket-proxy"]}
 ]`)),
 	}
@@ -333,7 +333,38 @@ func TestFilterContainerListKeepsReadOnlyContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "dockman") || strings.Contains(string(body), "docker-socket-proxy") {
+	if !strings.Contains(string(body), "dockman") || !strings.Contains(string(body), "FutureDockerField") || strings.Contains(string(body), "docker-socket-proxy") {
 		t.Fatalf("unexpected filtered list: %s", body)
+	}
+}
+
+func TestFilterEventsPreservesDockerEventFields(t *testing.T) {
+	allowed := dockerContainerMeta{ID: "allowed", Name: "dockman"}
+	denied := dockerContainerMeta{ID: "denied", Name: "docker-socket-proxy"}
+	cfg := &ProxyConfig{
+		containersByRef: map[string]dockerContainerMeta{
+			allowed.ID: allowed,
+			denied.ID:  denied,
+		},
+	}
+	service := &ServiceConfig{
+		ContainerScope: "all",
+		ContainerRules: map[string]ContainerAccess{
+			"docker-socket-proxy": containerAccessDeny,
+		},
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(strings.NewReader("{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"allowed\",\"Attributes\":{\"name\":\"dockman\"}},\"scope\":\"local\",\"time\":123,\"timeNano\":123456789000,\"FutureDockerField\":\"preserved\"}\n{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"denied\",\"Attributes\":{\"name\":\"docker-socket-proxy\"}},\"timeNano\":123456789001}\n")),
+	}
+	filterEventsResponse(resp, cfg, service)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `"timeNano":123456789000`) || !strings.Contains(got, `"FutureDockerField":"preserved"`) || strings.Contains(got, "docker-socket-proxy") {
+		t.Fatalf("unexpected filtered events: %s", got)
 	}
 }
