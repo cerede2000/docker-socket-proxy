@@ -1,24 +1,14 @@
-name: Test and publish development image
+name: Test and publish production image
 
 on:
   push:
     branches:
       - main
-    paths:
-      - .github/workflows/docker-image.yml
-      - Dockerfile
-      - go.mod
-      - src/**
   pull_request:
-    paths:
-      - .github/workflows/docker-image.yml
-      - Dockerfile
-      - go.mod
-      - src/**
   workflow_dispatch:
 
 concurrency:
-  group: docker-dev-${{ github.ref }}
+  group: docker-production-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -73,16 +63,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push development image
+      - name: Build and push production image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
-            APP_VERSION=dev
+            APP_VERSION=latest
             APP_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
