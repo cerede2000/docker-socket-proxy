@@ -1202,13 +1202,16 @@ func (d *eventDebouncer) willTriggerImmediately() bool {
 	return d.lastTrigger.IsZero() || timeSinceLastTrigger > d.delay*2
 }
 
-func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logger *log.Logger) {
+// eventLoop écoute un flux Docker long-vivant. eventsClient ne doit donc pas
+// avoir de timeout global ; discoveryClient reste borné pour les rafraîchissements
+// ponctuels déclenchés par les événements.
+func eventLoop(ctx context.Context, cfg *ProxyConfig, eventsClient, discoveryClient *http.Client, logger *log.Logger) {
 	backoff := 2 * time.Second
 	maxBackoff := 30 * time.Second
 
 	// Créer le debouncer avec callback de découverte
 	debouncer := newEventDebouncer(cfg.DebounceDelay, func() {
-		if err := discoverOnce(ctx, cfg, client, logger); err != nil {
+		if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
 			logger.Printf("[events] discover error: %v", err)
 		}
 	})
@@ -1236,7 +1239,7 @@ func eventLoop(ctx context.Context, cfg *ProxyConfig, client *http.Client, logge
 			continue
 		}
 
-		resp, err := client.Do(req)
+		resp, err := eventsClient.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				logger.Printf("[events] request aborted (context done): %v", err)
@@ -2170,10 +2173,10 @@ func main() {
 	// Boucles de fond :
 	// - découverte périodique (avec timeout)
 	// - watcher du fichier de profiles
-	// - écoute des events Docker (update au fil de l'eau avec debouncing intelligent, avec timeout)
+	// - écoute des events Docker (flux long-vivant, sans timeout global)
 	go discoverLoop(ctx, cfg, discoveryClient, logger)
 	go profileWatcher(ctx, cfg, logger)
-	go eventLoop(ctx, cfg, discoveryClient, logger)
+	go eventLoop(ctx, cfg, proxyClient, discoveryClient, logger)
 
 	targetURL, _ := url.Parse("http://docker")
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseConfigUsesEnvironment(t *testing.T) {
@@ -36,6 +37,18 @@ func TestParseConfigCLIOverridesEnvironment(t *testing.T) {
 	}
 	if cfg.SocketPath != "/run/cli.sock" {
 		t.Fatalf("SocketPath = %q, want %q", cfg.SocketPath, "/run/cli.sock")
+	}
+}
+
+func TestDockerClientTimeoutsSeparateStreamingFromDiscovery(t *testing.T) {
+	streaming := newDockerHTTPClient("/tmp/docker.sock")
+	if streaming.Timeout != 0 {
+		t.Fatalf("streaming client timeout = %s, want 0", streaming.Timeout)
+	}
+
+	discovery := newDockerHTTPClientWithTimeout("/tmp/docker.sock")
+	if discovery.Timeout != 30*time.Second {
+		t.Fatalf("discovery client timeout = %s, want 30s", discovery.Timeout)
 	}
 }
 
