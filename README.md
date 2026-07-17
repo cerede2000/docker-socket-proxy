@@ -1,40 +1,220 @@
 # docker-socket-proxy
 
-Proxy HTTP minimaliste devant le socket Docker. Les clients sont associés à un profil par leur adresse IP et les droits Docker sont refusés par défaut.
+Proxy HTTP minimaliste et sécurisé devant le socket Docker. Les clients sont associés à un profil par leur adresse IP, découverte depuis leurs labels Docker ; tout accès qui n'est pas explicitement accordé est refusé.
 
-## Image de développement
+Le projet permet de limiter les familles d'API Docker, puis de restreindre les opérations à certains conteneurs. Il évite ainsi de monter directement `/var/run/docker.sock` dans une application.
+
+## Image de production
 
 ```text
-ghcr.io/cerede2000/docker-socket-proxy:dev
+ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-L'image est publiée pour `linux/amd64` et `linux/arm64` après validation des tests. Elle utilise un binaire Go statique dans Distroless Debian 13 et s'exécute sans privilèges par défaut.
+L'image est multi-architecture (`linux/amd64` et `linux/arm64`), construite avec Go et exécutée sans privilèges dans Distroless Debian 13. Chaque mise à jour de `main` validée par la CI publie cette image.
 
-## Configuration
+## Principes de sécurité
+
+- Aucun droit n'est accordé implicitement.
+- Seuls les conteneurs portant `socketproxy.role` (ou l'alias `socketproxy.service`) et correspondant à un profil sont autorisés.
+- Le proxy ne retient que les IP partagées avec ses propres réseaux Docker.
+- Les listes, les événements et les opérations ciblant un conteneur respectent la même portée.
+- Le cache interne nom / ID de conteneur évite une requête Docker supplémentaire pour les vérifications usuelles.
+
+## Démarrage rapide
+
+Créez un fichier `profiles.yml`, puis lancez le proxy. Le montage du socket est en lecture seule : les requêtes Docker restent possibles via l'API Unix, mais le fichier socket ne peut pas être remplacé depuis le conteneur.
+
+```yaml
+services:
+  docker-socket-proxy:
+    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    user: "1000:998" # adapter à l'UID:GID pouvant lire le socket sur l'hôte
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./profiles.yml:/config/profiles.yml:ro
+    networks:
+      - socketproxy
+    restart: unless-stopped
+
+networks:
+  socketproxy:
+    internal: true
+```
+
+Le compte configuré avec `user` doit avoir accès au socket Docker de l'hôte. Vérifiez son UID et son GID avec `stat -c '%u:%g' /var/run/docker.sock` sous Linux, puis adaptez la valeur. Sur certaines installations, il est préférable de construire une image dérivée qui crée un groupe portant le GID réel du socket.
+
+## Associer un client à un profil
+
+Ajoutez l'un des deux labels suivants au conteneur client :
+
+```yaml
+labels:
+  socketproxy.role: mon-profil
+  # ou : socketproxy.service: mon-profil
+```
+
+Le profil est rechargé automatiquement lorsque `profiles.yml` est modifié. La découverte des IP intervient au démarrage, lors des événements Docker pertinents, et périodiquement.
+
+## Exemple complet : Traefik et Traefik Manager
+
+Cet exemple sépare les rôles : Traefik peut lire les informations nécessaires au provider Docker ; Traefik Manager peut seulement consulter et redémarrer le conteneur `traefik`. Il ne peut ni agir sur les autres conteneurs ni lancer d'exec.
+
+`compose.yml` :
+
+```yaml
+services:
+  docker-socket-proxy:
+    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    user: "1000:998" # à adapter à l'hôte
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./profiles.yml:/config/profiles.yml:ro
+    networks: [socketproxy]
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.endpoint=tcp://docker-socket-proxy:2375
+      - --providers.docker.exposedbydefault=false
+    labels:
+      socketproxy.role: traefik
+    networks: [socketproxy, frontend]
+    restart: unless-stopped
+
+  traefik-manager:
+    image: ghcr.io/chr0nzz/traefik-manager:latest
+    container_name: traefik-manager
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      RESTART_METHOD: proxy
+      TRAEFIK_CONTAINER: traefik
+    labels:
+      socketproxy.role: traefik-manager
+    networks: [socketproxy, frontend]
+    restart: unless-stopped
+
+networks:
+  socketproxy:
+    internal: true
+  frontend:
+    external: true
+```
+
+`profiles.yml` :
+
+```yaml
+traefik:
+  ping: true
+  version: true
+  containers: true
+  networks: true
+  events: true
+  session: true
+
+traefik-manager:
+  ping: true
+  version: true
+  containers: true
+  post: true
+  allow_restart: true
+  container_scope: allowlist
+  allowed_containers:
+    - traefik
+```
+
+`container_name: traefik` et `allowed_containers: [traefik]` doivent correspondre exactement. Le profil `traefik-manager` ne permet pas `start` ou `stop` : seul `POST /containers/traefik/restart` est admis.
+
+## Configuration du proxy
 
 | Variable | Défaut | Description |
 | --- | --- | --- |
-| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Chemin du socket Docker |
-| `PROXY_PORT` | `2375` | Port d'écoute et port utilisé par le healthcheck |
-| `PROXY_LISTEN` | vide | Adresse d'écoute complète, prioritaire sur `PROXY_PORT` |
-| `SOCKETPROXY_PROFILE_FILE` | `/config/profiles.yml` | Fichier de profils |
-| `DISCOVER_INTERVAL` | `30s` | Intervalle de redécouverte |
-| `EVENT_DEBOUNCE_DELAY` | `100ms` | Temporisation des événements Docker |
+| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Chemin du socket Docker à joindre |
+| `PROXY_PORT` | `2375` | Port d'écoute et port du healthcheck intégré |
+| `PROXY_LISTEN` | — | Adresse d'écoute complète ; prioritaire sur `PROXY_PORT` |
+| `SOCKETPROXY_PROFILE_FILE` | `/config/profiles.yml` | Fichier YAML des profils |
+| `DISCOVER_INTERVAL` | `30s` | Période de redécouverte des conteneurs ; durée Go (`15s`) ou nombre de secondes (`15`) |
+| `EVENT_DEBOUNCE_DELAY` | `100ms` | Délai de regroupement des événements Docker ; durée Go ou nombre de millisecondes |
 
-Les options `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--debounce-delay` restent disponibles et sont prioritaires sur l'environnement. Si `--listen` change le port, `PROXY_PORT` doit être renseigné avec le même port pour le healthcheck.
+Les arguments suivants sont disponibles et prioritaires sur les variables correspondantes : `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--debounce-delay`.
 
-Le compte effectif doit pouvoir lire le socket Docker. Le fichier Compose fournit un exemple avec un UID/GID hôte explicite ; adaptez `user` au propriétaire et au groupe du socket de votre machine.
+Le healthcheck appelle `http://127.0.0.1:$PROXY_PORT/version`. Si `--listen` ou `PROXY_LISTEN` utilise un autre port, renseignez `PROXY_PORT` avec ce même port.
 
-## Portée et règles par conteneur
+### Options de ligne de commande par profil
 
-Les noms de conteneurs sont exacts et correspondent au nom Docker sans le préfixe `/` (par exemple `container_name: dockman` devient `dockman`). La portée détermine l'accès normal ; `container_rules` ajoute des exceptions par nom.
+Les profils peuvent aussi être définis dans la commande du conteneur. Le format est `--<profil>.<option>=<valeur>` ou `--proxy-<profil>.<option>=<valeur>`.
 
-### Tous les conteneurs — comportement historique
+```yaml
+command:
+  - --traefik.ping=1
+  - --traefik.containers=1
+  - --traefik-manager.container_scope=allowlist
+  - --traefik-manager.allowed_containers=traefik
+```
 
-`all` est la valeur par défaut. Le profil conserve les droits Docker qui lui sont accordés sur tous les conteneurs.
+Les listes CLI acceptent des noms séparés par des virgules. `container_rule` accepte `nom:deny` ou `nom:readonly`. Le YAML reste préférable pour les configurations maintenues dans le temps.
+
+## Référence des profils
+
+Chaque famille est désactivée par défaut. Une valeur YAML booléenne (`true`/`false`) est recommandée.
+
+| Option | Famille d'API Docker autorisée |
+| --- | --- |
+| `ping` | `/_ping` |
+| `version` | `/version` |
+| `info` | `/info` |
+| `events` ou `event` | `/events` |
+| `auth` | `/auth` |
+| `build` | `/build` |
+| `commit` | `/commit` |
+| `configs` | `/configs` |
+| `containers` | `/containers` |
+| `distribution` | `/distribution` |
+| `exec` | `/exec` |
+| `images` | `/images` |
+| `networks` | `/networks` |
+| `nodes` | `/nodes` |
+| `plugins` | `/plugins` |
+| `secrets` | `/secrets` |
+| `services` | `/services` |
+| `session` | `/session` |
+| `swarm` | `/swarm` |
+| `system` | `/system` |
+| `tasks` | `/tasks` |
+| `volumes` | `/volumes` |
+
+Les écritures (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdites même lorsqu'une famille est activée, sauf si `post: true` est ajouté. Pour les opérations de conteneur, `post` doit être complété explicitement par `allow_start`, `allow_stop` et/ou `allow_restart` selon le besoin. `allow_restarts` est accepté comme alias de `allow_restart`.
+
+`apirewrite` force une version d'API Docker pour un profil, par exemple `apirewrite: "1.53"`.
+
+## Portée des conteneurs
+
+Les noms sont les noms Docker sans le préfixe `/`. Les règles s'appliquent aux listes, événements, inspections, logs, statistiques, exec, opérations réseau et actions ciblées.
+
+### Accès large : `all`
+
+`all` est la valeur par défaut. Le profil conserve ses droits sur tous les conteneurs ; utilisez une règle `deny` pour retirer une cible critique.
 
 ```yaml
 portainer:
+  ping: true
+  version: true
   containers: true
   images: true
   networks: true
@@ -43,9 +223,12 @@ portainer:
   allow_stop: true
   allow_restart: true
   container_scope: all
+  container_rules:
+    - name: docker-socket-proxy
+      access: deny
 ```
 
-### Allowlist — agir seulement sur certaines cibles
+### Accès minimal : `allowlist`
 
 Les conteneurs absents de `allowed_containers` sont invisibles et inaccessibles.
 
@@ -53,20 +236,19 @@ Les conteneurs absents de `allowed_containers` sont invisibles et inaccessibles.
 traefik-manager:
   containers: true
   post: true
-  allow_start: true
-  allow_stop: true
   allow_restart: true
   container_scope: allowlist
   allowed_containers:
     - traefik
 ```
 
-### Blacklist — profil large avec cibles masquées
+### Accès large avec exclusions : `blacklist`
 
 Les conteneurs de `blocked_containers` sont invisibles et toute opération les visant est refusée.
 
 ```yaml
 dockhand:
+  ping: true
   containers: true
   events: true
   post: true
@@ -78,22 +260,9 @@ dockhand:
     - docker-socket-proxy
 ```
 
-### Règle `deny` — masquer une cible, quelle que soit la portée
+### Exceptions par conteneur : `container_rules`
 
-`container_rules` est prioritaire sur `container_scope`. Cette variante est utile avec `all`, ou pour rendre la règle plus explicite.
-
-```yaml
-operator:
-  containers: true
-  container_scope: all
-  container_rules:
-    - name: docker-socket-proxy
-      access: deny
-```
-
-### Règle `readonly` — voir sans pouvoir agir
-
-Une cible en lecture seule reste visible dans les listes et événements. Seules les API de consultation suivantes sont admises : `inspect`, `logs`, `stats`, `top` et `changes`. Les opérations de modification, les exec, les archives et l'attach sont refusés.
+`container_rules` est prioritaire sur la portée. `deny` masque totalement la cible. `readonly` laisse visibles les listes et événements et autorise uniquement `inspect`, `logs`, `stats`, `top` et `changes` ; les actions, `exec`, les archives et `attach` sont refusés.
 
 ```yaml
 dockhand:
@@ -111,11 +280,13 @@ dockhand:
       access: readonly
 ```
 
-Dans cet exemple, Dockhand peut consulter les logs et statistiques de `dockman`, mais pas le redémarrer ; `docker-socket-proxy` reste entièrement masqué. Les conteneurs non cités conservent les droits du profil.
+Une cible ne peut pas figurer à la fois dans `blocked_containers` et `container_rules`. Les valeurs d'accès admises sont `deny` et `readonly`. `container_scope: all` ne peut pas contenir de liste blanche ou noire ; `allowlist` ne peut pas contenir `blocked_containers` et `blacklist` ne peut pas contenir `allowed_containers`.
 
-Une même cible ne peut pas figurer à la fois dans `blocked_containers` et `container_rules`. Les valeurs autorisées pour `access` sont exclusivement `deny` et `readonly`.
+Lorsqu'une portée est active (`allowlist`, `blacklist` ou une règle nominative), les opérations globales `create` et `prune` sont refusées afin de ne pas contourner la restriction par conteneur.
 
-Pour toute portée active (`allowlist`, `blacklist`, ou au moins une `container_rules`), les opérations globales de conteneurs (`create` et `prune`) sont refusées. Les règles sont appliquées aussi aux listes de conteneurs et au flux d'événements.
+## Exploitation
+
+Le proxy écrit dans ses journaux la découverte des rôles et les refus. Un client sans rôle, avec un rôle inconnu, ou ne partageant aucun réseau avec le proxy reçoit `403 Forbidden`.
 
 ## Développement
 
