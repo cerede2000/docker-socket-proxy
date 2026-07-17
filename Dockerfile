@@ -7,7 +7,7 @@ ENV CGO_ENABLED=0
 
 WORKDIR /src
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY src/ ./src
 
 RUN go build -trimpath \
