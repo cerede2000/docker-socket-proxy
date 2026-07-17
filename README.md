@@ -25,6 +25,30 @@ Les options `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--de
 
 Le compte effectif doit pouvoir lire le socket Docker. Le fichier Compose fournit un exemple avec un UID/GID hôte explicite ; adaptez `user` au propriétaire et au groupe du socket de votre machine.
 
+## Portée des conteneurs
+
+Par défaut, un profil conserve ses droits sur tous les conteneurs. `container_scope` ajoute une restriction optionnelle :
+
+```yaml
+traefik-manager:
+  containers: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  container_scope: allowlist
+  allowed_containers:
+    - traefik
+
+operator:
+  containers: true
+  events: true
+  container_scope: blacklist
+  blocked_containers:
+    - docker-socket-proxy
+```
+
+Valeurs possibles : `all` (comportement historique), `allowlist` et `blacklist`. Les noms sont exacts et correspondent au nom Docker sans le préfixe `/`. Les opérations ciblées, les listes de conteneurs et les événements sont filtrés. Les opérations globales de conteneurs (`create` et `prune`) sont refusées pour un profil ayant une portée active.
+
 ## Développement
 
 ```bash

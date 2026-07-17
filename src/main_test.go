@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -111,11 +113,138 @@ func TestRewriteAPIVersion(t *testing.T) {
 }
 
 func TestParseProfilesYAML(t *testing.T) {
-	profiles, err := parseProfilesYAML("home:\n  ping: true\n  containers: false\n")
+	profiles, err := parseProfilesYAML("home:\n  ping: true\n  containers: false\n  container_scope: allowlist\n  allowed_containers:\n    - traefik\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profiles["home"]["ping"] != "true" || profiles["home"]["containers"] != "false" {
-		t.Fatalf("unexpected profiles: %#v", profiles)
+	home := profiles["home"]
+	if !home.Ping || home.Containers || home.ContainerScope != "allowlist" {
+		t.Fatalf("unexpected profile: %#v", home)
+	}
+	if _, ok := home.AllowedContainers["traefik"]; !ok {
+		t.Fatalf("traefik missing from allowlist: %#v", home.AllowedContainers)
+	}
+}
+
+func TestParseProfilesYAMLRejectsInvalidScope(t *testing.T) {
+	_, err := parseProfilesYAML("manager:\n  container_scope: blacklist\n  allowed_containers:\n    - traefik\n")
+	if err == nil {
+		t.Fatal("invalid blacklist profile was accepted")
+	}
+}
+
+func TestParseProfilesYAMLRejectsUnknownKey(t *testing.T) {
+	_, err := parseProfilesYAML("manager:\n  containers: true\n  allowd_containers: []\n")
+	if err == nil {
+		t.Fatal("unknown profile key was accepted")
+	}
+}
+
+func TestContainerScopes(t *testing.T) {
+	traefik := dockerContainerMeta{ID: "a", Name: "traefik"}
+	proxy := dockerContainerMeta{ID: "b", Name: "docker-socket-proxy"}
+
+	allowlist := &ServiceConfig{
+		ContainerScope:    "allowlist",
+		AllowedContainers: map[string]struct{}{"traefik": {}},
+		BlockedContainers: map[string]struct{}{},
+	}
+	if !allowlist.AllowsContainer(traefik) || allowlist.AllowsContainer(proxy) {
+		t.Fatal("allowlist did not limit the target set")
+	}
+
+	blacklist := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+	}
+	if !blacklist.AllowsContainer(traefik) || blacklist.AllowsContainer(proxy) {
+		t.Fatal("blacklist did not exclude the protected container")
+	}
+}
+
+func TestBuildContainerIndex(t *testing.T) {
+	index := buildContainerIndex([]dockerContainerSummary{{
+		ID:    "0123456789abcdef",
+		Names: []string{"/traefik"},
+	}})
+	for _, ref := range []string{"traefik", "0123456789abcdef", "0123456789ab"} {
+		if got, ok := index[ref]; !ok || got.Name != "traefik" {
+			t.Fatalf("index[%q] = %#v, %v", ref, got, ok)
+		}
+	}
+}
+
+func TestEnforceContainerScopeUsesCachedCanonicalID(t *testing.T) {
+	meta := dockerContainerMeta{ID: "0123456789abcdef", Name: "traefik"}
+	cfg := &ProxyConfig{
+		containersByRef: buildContainerIndex([]dockerContainerSummary{{
+			ID:    meta.ID,
+			Names: []string{"/traefik"},
+		}}),
+		execToContainer: make(map[string]string),
+	}
+	service := &ServiceConfig{
+		ContainerScope:    "allowlist",
+		AllowedContainers: map[string]struct{}{"traefik": {}},
+		BlockedContainers: map[string]struct{}{},
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://proxy/v1.51/containers/traefik/restart", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err != nil {
+		t.Fatalf("allowed target was denied: %v", err)
+	}
+	if req.URL.Path != "/v1.51/containers/0123456789abcdef/restart" {
+		t.Fatalf("path = %q, target was not rewritten to canonical ID", req.URL.Path)
+	}
+}
+
+func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T) {
+	cfg := &ProxyConfig{
+		containersByRef: buildContainerIndex([]dockerContainerSummary{{
+			ID:    "0123456789abcdef",
+			Names: []string{"/docker-socket-proxy"},
+		}}),
+		execToContainer: make(map[string]string),
+	}
+	service := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+	}
+	for _, path := range []string{"/containers/docker-socket-proxy/stop", "/containers/prune"} {
+		req, err := http.NewRequest(http.MethodPost, "http://proxy"+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err == nil {
+			t.Fatalf("scoped request %s was unexpectedly allowed", path)
+		}
+	}
+}
+
+func TestFilterContainerListResponse(t *testing.T) {
+	service := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		AllowedContainers: map[string]struct{}{},
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`[
+  {"Id":"a","Names":["/traefik"]},
+  {"Id":"b","Names":["/docker-socket-proxy"]}
+]`)),
+	}
+	filterContainerListResponse(resp, nil, service)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "docker-socket-proxy") || !strings.Contains(string(body), "traefik") {
+		t.Fatalf("unexpected filtered list: %s", body)
 	}
 }

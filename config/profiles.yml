@@ -19,3 +19,31 @@ portainer:
   allow_start: true
   allow_stop: true
   allow_restart: true
+
+# Exemple de profil restreint : le rôle conserve ses droits Docker, mais ne peut
+# agir que sur le conteneur nommé traefik.
+traefik-manager:
+  ping: true
+  version: true
+  containers: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: allowlist
+  allowed_containers:
+    - traefik
+
+# Exemple de profil large qui exclut tout de même une cible critique.
+operator:
+  ping: true
+  version: true
+  containers: true
+  events: true
+  post: true
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  container_scope: blacklist
+  blocked_containers:
+    - docker-socket-proxy
