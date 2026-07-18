@@ -1,51 +1,53 @@
 # docker-socket-proxy
 
+**English** | [Français](README.fr.md)
+
 [![Docker Scout report](https://img.shields.io/badge/Docker%20Scout-view%20report-2496ED?logo=docker&logoColor=white)](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy)
 
-Proxy HTTP minimaliste et sécurisé devant le socket Docker. Les clients sont associés à un profil par leur adresse IP, découverte depuis leurs labels Docker ; tout accès qui n'est pas explicitement accordé est refusé.
+A minimal, security-focused HTTP proxy in front of the Docker socket. Client containers are assigned a profile from their Docker labels and shared network IP addresses; access is denied unless it is explicitly granted.
 
-Le projet permet de limiter les familles d'API Docker, puis de restreindre les opérations à certains conteneurs. Il évite ainsi de monter directement `/var/run/docker.sock` dans une application.
+Instead of mounting `/var/run/docker.sock` directly into an application, grant the Docker API families it needs and, when necessary, restrict those permissions to a precise set of target containers.
 
-## Images de production
+## Production images
 
 ```text
 cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans `distroless/static-debian13:nonroot`.
+Docker Hub is the primary registry; GitHub Container Registry is also available. Both images support `linux/amd64` and `linux/arm64`, are built with Go, and run unprivileged on `distroless/static-debian13:nonroot`.
 
-`latest` suit `main`. Chaque release Git `vX.Y.Z` publie également les tags Docker immuables `X.Y.Z` et `X.Y` sur les deux registres.
+`latest` follows `main`. A Git release `vX.Y.Z` additionally publishes immutable `X.Y.Z` and `X.Y` tags to both registries.
 
-L'image publiée est analysée en continu par [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). Le rapport est lié ici plutôt que figé dans le README : son résultat suit les mises à jour des vulnérabilités et de l'image.
+The published image is continuously analysed by [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). The live report is linked rather than hard-coded here, so its result always reflects current image and vulnerability data.
 
-## Ce qui le différencie
+## Why this proxy is different
 
-Les socket proxies classiques limitent principalement les familles d'endpoints Docker. Celui-ci ajoute deux niveaux de contrôle complémentaires :
+Most Docker socket proxies only filter Docker API endpoint families. This project adds two complementary layers:
 
-1. Le droit est attribué au **client** par profil, automatiquement via son label Docker (`socketproxy.role`).
-2. Le droit est ensuite limité à la **cible** : tous les conteneurs, allowlist, blacklist, refus explicite, ou accès strictement en lecture seule par conteneur.
+1. A **client** receives permissions through a profile, discovered from its Docker label (`socketproxy.role`).
+2. Permissions are then scoped to the **target** container: all containers, an allowlist, a blacklist, or explicit `deny` and `readonly` exceptions.
 
-Un outil peut donc disposer d'un accès Docker étendu lorsque c'est nécessaire (Portainer, un opérateur), tandis que Traefik Manager peut uniquement consulter et redémarrer `traefik`. Le contrôle nom/ID est maintenu en cache et s'applique aux listes, événements et appels directs.
+This lets an operator such as Portainer retain broad access where it is genuinely needed, while Traefik Manager can inspect and restart only `traefik`. A cached container-name / ID mapping keeps normal scoped checks fast and is applied consistently to lists, events, and direct requests.
 
-## Principes de sécurité
+## Security model
 
-- Aucun droit n'est accordé implicitement.
-- Seuls les conteneurs portant `socketproxy.role` (ou l'alias `socketproxy.service`) et correspondant à un profil sont autorisés.
-- Le proxy ne retient que les IP partagées avec ses propres réseaux Docker.
-- Les listes, les événements et les opérations ciblant un conteneur respectent la même portée.
-- Le cache interne nom / ID de conteneur évite une requête Docker supplémentaire pour les vérifications usuelles.
+- No permission is granted implicitly.
+- Only containers with `socketproxy.role` (or the `socketproxy.service` alias) that match a configured profile can access the proxy.
+- The proxy only keeps client IP addresses shared with its own Docker networks.
+- Container lists, events, and targeted operations obey the same target scope.
+- The internal name / ID cache avoids an additional Docker request for usual authorization checks.
 
-## Démarrage rapide
+## Quick start
 
-Créez un fichier `profiles.yml`, puis lancez le proxy. Le montage du socket est en lecture seule : les requêtes Docker restent possibles via l'API Unix, mais le fichier socket ne peut pas être remplacé depuis le conteneur.
+Create `profiles.yml`, then start the proxy. The Docker socket is mounted read-only: Docker API requests still work over the Unix socket, but the socket file cannot be replaced from inside the container.
 
 ```yaml
 services:
   docker-socket-proxy:
     image: cerede2000/docker-socket-proxy:latest
     container_name: docker-socket-proxy
-    user: "1000:998" # adapter à l'UID:GID pouvant lire le socket sur l'hôte
+    user: "1000:998" # adapt to an UID:GID allowed to read the host socket
     read_only: true
     cap_drop: [ALL]
     security_opt:
@@ -64,38 +66,37 @@ networks:
     internal: true
 ```
 
-Le compte configuré avec `user` doit avoir accès au socket Docker de l'hôte. Vérifiez son UID et son GID avec `stat -c '%u:%g' /var/run/docker.sock` sous Linux, puis adaptez la valeur. Sur certaines installations, il est préférable de construire une image dérivée qui crée un groupe portant le GID réel du socket.
+The configured account must be able to access the host Docker socket. On Linux, inspect it with `stat -c '%u:%g' /var/run/docker.sock`, then adapt `user`. On some hosts, a derived image that creates a group with the socket's real GID is preferable.
 
-## Associer un client à un profil
+## Assign a client to a profile
 
-Ajoutez l'un des deux labels suivants au conteneur client :
+Add either label to the client container:
 
 ```yaml
 labels:
-  socketproxy.role: mon-profil
-  # ou : socketproxy.service: mon-profil
+  socketproxy.role: my-profile
+  # or: socketproxy.service: my-profile
 ```
 
-Le profil est rechargé automatiquement lorsque `profiles.yml` est modifié. La découverte des IP intervient au démarrage, lors des événements Docker pertinents, et périodiquement.
+Profiles are reloaded automatically after a `profiles.yml` change. Client IP discovery occurs at startup, after relevant Docker events, and periodically.
 
-## Exemple complet : Traefik et Traefik Manager
+## Full example: Traefik and Traefik Manager
 
-Cet exemple sépare les rôles : Traefik peut lire les informations nécessaires au provider Docker ; Traefik Manager peut seulement consulter et redémarrer le conteneur `traefik`. Il ne peut ni agir sur les autres conteneurs ni lancer d'exec.
+Traefik receives only the read access required by its Docker provider. Traefik Manager can inspect and restart **only** the `traefik` container; it cannot affect other containers or create an exec session.
 
-`compose.yml` :
+`compose.yml`:
 
 ```yaml
 services:
   docker-socket-proxy:
     image: cerede2000/docker-socket-proxy:latest
     container_name: docker-socket-proxy
-    user: "1000:998" # à adapter à l'hôte
+    user: "1000:998" # adapt to the host
     read_only: true
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    tmpfs:
-      - /tmp
+    tmpfs: [/tmp]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./profiles.yml:/config/profiles.yml:ro
@@ -133,7 +134,7 @@ networks:
     external: true
 ```
 
-`profiles.yml` :
+`profiles.yml`:
 
 ```yaml
 traefik:
@@ -155,26 +156,26 @@ traefik-manager:
     - traefik
 ```
 
-`container_name: traefik` et `allowed_containers: [traefik]` doivent correspondre exactement. Le profil `traefik-manager` ne permet pas `start` ou `stop` : seul `POST /containers/traefik/restart` est admis.
+`container_name: traefik` and `allowed_containers: [traefik]` must match exactly. The `traefik-manager` profile grants neither `start` nor `stop`: only `POST /containers/traefik/restart` is allowed.
 
-## Configuration du proxy
+## Proxy configuration
 
-| Variable | Défaut | Description |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Chemin du socket Docker à joindre |
-| `PROXY_PORT` | `2375` | Port d'écoute et port du healthcheck intégré |
-| `PROXY_LISTEN` | — | Adresse d'écoute complète ; prioritaire sur `PROXY_PORT` |
-| `SOCKETPROXY_PROFILE_FILE` | `/config/profiles.yml` | Fichier YAML des profils |
-| `DISCOVER_INTERVAL` | `30s` | Période de redécouverte des conteneurs ; durée Go (`15s`) ou nombre de secondes (`15`) |
-| `EVENT_DEBOUNCE_DELAY` | `100ms` | Délai de regroupement des événements Docker ; durée Go ou nombre de millisecondes |
+| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Docker Unix socket path |
+| `PROXY_PORT` | `2375` | Listen port and built-in healthcheck port |
+| `PROXY_LISTEN` | — | Full listen address; takes precedence over `PROXY_PORT` |
+| `SOCKETPROXY_PROFILE_FILE` | `/config/profiles.yml` | YAML profile file |
+| `DISCOVER_INTERVAL` | `30s` | Container rediscovery interval; Go duration (`15s`) or seconds (`15`) |
+| `EVENT_DEBOUNCE_DELAY` | `100ms` | Docker event debounce delay; Go duration or milliseconds |
 
-Les arguments suivants sont disponibles et prioritaires sur les variables correspondantes : `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--debounce-delay`.
+The equivalent flags take precedence over environment variables: `--listen`, `--socket`, `--profiles`, `--discover-interval`, and `--debounce-delay`.
 
-Le healthcheck appelle `http://127.0.0.1:$PROXY_PORT/version`. Si `--listen` ou `PROXY_LISTEN` utilise un autre port, renseignez `PROXY_PORT` avec ce même port.
+The healthcheck calls `http://127.0.0.1:$PROXY_PORT/version`. If `--listen` or `PROXY_LISTEN` uses another port, set `PROXY_PORT` to that same port.
 
-### Options de ligne de commande par profil
+### Profile options on the command line
 
-Les profils peuvent aussi être définis dans la commande du conteneur. Le format est `--<profil>.<option>=<valeur>` ou `--proxy-<profil>.<option>=<valeur>`.
+Profiles can also be defined in the container command. Use `--<profile>.<option>=<value>` or `--proxy-<profile>.<option>=<value>`.
 
 ```yaml
 command:
@@ -184,18 +185,18 @@ command:
   - --traefik-manager.allowed_containers=traefik
 ```
 
-Les listes CLI acceptent des noms séparés par des virgules. `container_rule` accepte `nom:deny` ou `nom:readonly`. Le YAML reste préférable pour les configurations maintenues dans le temps.
+CLI lists use comma-separated names. `container_rule` accepts `name:deny` or `name:readonly`. YAML is generally easier to maintain for long-lived configurations.
 
-## Référence des profils
+## Profile reference
 
-Chaque famille est désactivée par défaut. Une valeur YAML booléenne (`true`/`false`) est recommandée.
+Every API family is disabled by default. YAML booleans (`true` / `false`) are recommended.
 
-| Option | Famille d'API Docker autorisée |
+| Option | Docker API family |
 | --- | --- |
 | `ping` | `/_ping` |
 | `version` | `/version` |
 | `info` | `/info` |
-| `events` ou `event` | `/events` |
+| `events` or `event` | `/events` |
 | `auth` | `/auth` |
 | `build` | `/build` |
 | `commit` | `/commit` |
@@ -215,17 +216,17 @@ Chaque famille est désactivée par défaut. Une valeur YAML booléenne (`true`/
 | `tasks` | `/tasks` |
 | `volumes` | `/volumes` |
 
-Les écritures (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdites même lorsqu'une famille est activée, sauf si `post: true` est ajouté. Pour les opérations de conteneur, `post` doit être complété explicitement par `allow_start`, `allow_stop` et/ou `allow_restart` selon le besoin. `allow_restarts` est accepté comme alias de `allow_restart`.
+Write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even if a family is enabled, unless `post: true` is set. Container operations also require the matching explicit option: `allow_start`, `allow_stop`, and/or `allow_restart`. `allow_restarts` is accepted as an alias for `allow_restart`.
 
-`apirewrite` force une version d'API Docker pour un profil, par exemple `apirewrite: "1.53"`.
+`apirewrite` forces a Docker API version for a profile, for example `apirewrite: "1.53"`.
 
-## Portée des conteneurs
+## Container scope
 
-Les noms sont les noms Docker sans le préfixe `/`. Les règles s'appliquent aux listes, événements, inspections, logs, statistiques, exec, opérations réseau et actions ciblées.
+Names are Docker container names without the `/` prefix. Scope rules apply to lists, events, inspect, logs, stats, exec, network operations, and targeted actions.
 
-### Accès large : `all`
+### Broad access: `all`
 
-`all` est la valeur par défaut. Le profil conserve ses droits sur tous les conteneurs ; utilisez une règle `deny` pour retirer une cible critique.
+`all` is the default. The profile keeps its rights over every container; add a `deny` rule to remove a critical target.
 
 ```yaml
 portainer:
@@ -244,9 +245,9 @@ portainer:
       access: deny
 ```
 
-### Accès minimal : `allowlist`
+### Minimum access: `allowlist`
 
-Les conteneurs absents de `allowed_containers` sont invisibles et inaccessibles.
+Containers absent from `allowed_containers` are hidden and inaccessible.
 
 ```yaml
 traefik-manager:
@@ -254,13 +255,12 @@ traefik-manager:
   post: true
   allow_restart: true
   container_scope: allowlist
-  allowed_containers:
-    - traefik
+  allowed_containers: [traefik]
 ```
 
-### Accès large avec exclusions : `blacklist`
+### Broad access with exclusions: `blacklist`
 
-Les conteneurs de `blocked_containers` sont invisibles et toute opération les visant est refusée.
+Containers in `blocked_containers` are hidden and every operation targeting them is rejected.
 
 ```yaml
 dockhand:
@@ -272,13 +272,12 @@ dockhand:
   allow_stop: true
   allow_restart: true
   container_scope: blacklist
-  blocked_containers:
-    - docker-socket-proxy
+  blocked_containers: [docker-socket-proxy]
 ```
 
-### Exceptions par conteneur : `container_rules`
+### Per-container exceptions: `container_rules`
 
-`container_rules` est prioritaire sur la portée. `deny` masque totalement la cible. `readonly` laisse visibles les listes et événements et autorise uniquement `inspect`, `logs`, `stats`, `top` et `changes` ; les actions, `exec`, les archives et `attach` sont refusés.
+`container_rules` takes precedence over the scope. `deny` fully hides the target. `readonly` keeps it visible in lists and events, and permits only `inspect`, `logs`, `stats`, `top`, and `changes`; actions, exec, archives, and attach remain forbidden.
 
 ```yaml
 dockhand:
@@ -289,39 +288,38 @@ dockhand:
   allow_stop: true
   allow_restart: true
   container_scope: blacklist
-  blocked_containers:
-    - docker-socket-proxy
+  blocked_containers: [docker-socket-proxy]
   container_rules:
     - name: dockman
       access: readonly
 ```
 
-Une cible ne peut pas figurer à la fois dans `blocked_containers` et `container_rules`. Les valeurs d'accès admises sont `deny` et `readonly`. `container_scope: all` ne peut pas contenir de liste blanche ou noire ; `allowlist` ne peut pas contenir `blocked_containers` et `blacklist` ne peut pas contenir `allowed_containers`.
+A target cannot appear in both `blocked_containers` and `container_rules`. Valid access values are `deny` and `readonly`. `container_scope: all` cannot contain an allowlist or blacklist; `allowlist` cannot contain `blocked_containers`; `blacklist` cannot contain `allowed_containers`.
 
-Lorsqu'une portée est active (`allowlist`, `blacklist` ou une règle nominative), les opérations globales `create` et `prune` sont refusées afin de ne pas contourner la restriction par conteneur.
+When any scope is active (`allowlist`, `blacklist`, or a named rule), global `create` and `prune` operations are rejected so they cannot bypass the target restriction.
 
-## Exploitation
+## Network and TLS
 
-Le proxy écrit dans ses journaux la découverte des rôles et les refus. Un client sans rôle, avec un rôle inconnu, ou ne partageant aucun réseau avec le proxy reçoit `403 Forbidden`.
-
-## Réseau et TLS
-
-Le proxy est conçu pour une communication **locale au moteur Docker** :
+The proxy is designed for **local Docker Engine communication**:
 
 ```text
-client Docker -- HTTP privé --> docker-socket-proxy -- socket Unix --> dockerd
+Docker client -- private HTTP --> docker-socket-proxy -- Unix socket --> dockerd
 ```
 
-- La liaison entre le proxy et Docker utilise `DOCKER_SOCKET_PATH` (par défaut `/var/run/docker.sock`). Elle ne traverse pas le réseau et n'utilise donc pas TLS, certificat ou autorité de certification (CA).
-- Le proxy n'ouvre pas de connexion HTTPS sortante et ne prend pas en charge un moteur Docker distant configuré par `DOCKER_HOST=tcp://…`.
-- Le port `2375` est volontairement en HTTP clair : il doit rester accessible **uniquement** depuis un réseau Docker interne, partagé avec les clients autorisés. N'ajoutez pas de `ports:` et ne l'exposez jamais par Traefik, un load balancer ou Internet.
-- `internal: true` réduit l'exposition du réseau, mais tout conteneur qui y est attaché reste un client potentiel : n'y raccordez que le proxy et les services qui ont réellement besoin de l'API Docker.
+- The proxy-to-Docker connection uses `DOCKER_SOCKET_PATH` (default `/var/run/docker.sock`). It does not cross a network, therefore does not use TLS, certificates, or a certificate authority (CA).
+- The proxy does not make outgoing HTTPS connections and does not support a remote Docker Engine configured through `DOCKER_HOST=tcp://…`.
+- Port `2375` intentionally uses plain HTTP. It must be reachable **only** on an internal Docker network shared with authorized clients. Do not add `ports:`, expose it through Traefik or a load balancer, or publish it to the Internet.
+- `internal: true` reduces exposure, but every container attached to that network remains a potential client. Attach only the proxy and services that actually need Docker API access.
 
-Cette approche est la même que celle des proxies de référence Tecnativa et LinuxServer : le contrôle d'accès réseau et le filtrage d'API remplacent une terminaison TLS sur un port qui ne doit pas être publié. Si un besoin inter-hôtes apparaît, déployez un proxy local par hôte plutôt que d'étendre ce port : l'association client/profil de ce projet repose sur les réseaux Docker locaux.
+This is the same model used by the Tecnativa and LinuxServer socket proxies: network isolation and API filtering replace TLS termination for a port that must never be published. If you need cross-host access, deploy a local proxy per host rather than extending this port; client/profile association relies on local Docker networks.
 
-La runtime `distroless/static-debian13:nonroot` est adaptée à ce modèle : le binaire Go est compilé avec `CGO_ENABLED=0`, sans dépendance à `glibc`, OpenSSL ni magasin de CA. Ajouter des CA ne renforcerait pas cette configuration ; elles ne deviendraient nécessaires qu'avec une future fonctionnalité HTTPS sortante ou mTLS.
+`distroless/static-debian13:nonroot` fits this design. The Go binary is built with `CGO_ENABLED=0`, with no dependency on `glibc`, OpenSSL, or a CA store. Adding CA certificates would not strengthen this configuration; they would only become useful if a future feature introduced outgoing HTTPS or mTLS.
 
-## Développement
+## Operations
+
+The proxy logs profile discovery and denials. A client with no role, an unknown role, or no shared network with the proxy receives `403 Forbidden`.
+
+## Development
 
 ```bash
 go test -race ./...
