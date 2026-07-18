@@ -1,5 +1,7 @@
 # docker-socket-proxy
 
+[![Docker Scout report](https://img.shields.io/badge/Docker%20Scout-view%20report-2496ED?logo=docker&logoColor=white)](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy)
+
 Proxy HTTP minimaliste et sécurisé devant le socket Docker. Les clients sont associés à un profil par leur adresse IP, découverte depuis leurs labels Docker ; tout accès qui n'est pas explicitement accordé est refusé.
 
 Le projet permet de limiter les familles d'API Docker, puis de restreindre les opérations à certains conteneurs. Il évite ainsi de monter directement `/var/run/docker.sock` dans une application.
@@ -11,9 +13,11 @@ cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans Distroless Debian 13.
+La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans `distroless/static-debian13:nonroot`.
 
 `latest` suit `main`. Chaque release Git `vX.Y.Z` publie également les tags Docker immuables `X.Y.Z` et `X.Y` sur les deux registres.
+
+L'image publiée est analysée en continu par [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). Le rapport est lié ici plutôt que figé dans le README : son résultat suit les mises à jour des vulnérabilités et de l'image.
 
 ## Ce qui le différencie
 
@@ -39,7 +43,7 @@ Créez un fichier `profiles.yml`, puis lancez le proxy. Le montage du socket est
 ```yaml
 services:
   docker-socket-proxy:
-    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    image: cerede2000/docker-socket-proxy:latest
     container_name: docker-socket-proxy
     user: "1000:998" # adapter à l'UID:GID pouvant lire le socket sur l'hôte
     read_only: true
@@ -83,7 +87,7 @@ Cet exemple sépare les rôles : Traefik peut lire les informations nécessaires
 ```yaml
 services:
   docker-socket-proxy:
-    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    image: cerede2000/docker-socket-proxy:latest
     container_name: docker-socket-proxy
     user: "1000:998" # à adapter à l'hôte
     read_only: true
@@ -299,6 +303,23 @@ Lorsqu'une portée est active (`allowlist`, `blacklist` ou une règle nominative
 ## Exploitation
 
 Le proxy écrit dans ses journaux la découverte des rôles et les refus. Un client sans rôle, avec un rôle inconnu, ou ne partageant aucun réseau avec le proxy reçoit `403 Forbidden`.
+
+## Réseau et TLS
+
+Le proxy est conçu pour une communication **locale au moteur Docker** :
+
+```text
+client Docker -- HTTP privé --> docker-socket-proxy -- socket Unix --> dockerd
+```
+
+- La liaison entre le proxy et Docker utilise `DOCKER_SOCKET_PATH` (par défaut `/var/run/docker.sock`). Elle ne traverse pas le réseau et n'utilise donc pas TLS, certificat ou autorité de certification (CA).
+- Le proxy n'ouvre pas de connexion HTTPS sortante et ne prend pas en charge un moteur Docker distant configuré par `DOCKER_HOST=tcp://…`.
+- Le port `2375` est volontairement en HTTP clair : il doit rester accessible **uniquement** depuis un réseau Docker interne, partagé avec les clients autorisés. N'ajoutez pas de `ports:` et ne l'exposez jamais par Traefik, un load balancer ou Internet.
+- `internal: true` réduit l'exposition du réseau, mais tout conteneur qui y est attaché reste un client potentiel : n'y raccordez que le proxy et les services qui ont réellement besoin de l'API Docker.
+
+Cette approche est la même que celle des proxies de référence Tecnativa et LinuxServer : le contrôle d'accès réseau et le filtrage d'API remplacent une terminaison TLS sur un port qui ne doit pas être publié. Si un besoin inter-hôtes apparaît, déployez un proxy local par hôte plutôt que d'étendre ce port : l'association client/profil de ce projet repose sur les réseaux Docker locaux.
+
+La runtime `distroless/static-debian13:nonroot` est adaptée à ce modèle : le binaire Go est compilé avec `CGO_ENABLED=0`, sans dépendance à `glibc`, OpenSSL ni magasin de CA. Ajouter des CA ne renforcerait pas cette configuration ; elles ne deviendraient nécessaires qu'avec une future fonctionnalité HTTPS sortante ou mTLS.
 
 ## Développement
 
