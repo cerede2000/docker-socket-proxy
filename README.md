@@ -4,13 +4,14 @@ Proxy HTTP minimaliste et sécurisé devant le socket Docker. Les clients sont a
 
 Le projet permet de limiter les familles d'API Docker, puis de restreindre les opérations à certains conteneurs. Il évite ainsi de monter directement `/var/run/docker.sock` dans une application.
 
-## Image de production
+## Images de production
 
 ```text
+cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-L'image est multi-architecture (`linux/amd64` et `linux/arm64`), construite avec Go et exécutée sans privilèges dans Distroless Debian 13. Chaque mise à jour de `main` validée par la CI publie cette image.
+La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans Distroless Debian 13. Chaque mise à jour de `main` validée par la CI les publie avec le tag `latest`.
 
 ## Principes de sécurité
 
