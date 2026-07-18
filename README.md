@@ -11,7 +11,18 @@ cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans Distroless Debian 13. Chaque mise à jour de `main` validée par la CI les publie avec le tag `latest`.
+La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans Distroless Debian 13.
+
+`latest` suit `main`. Chaque release Git `vX.Y.Z` publie également les tags Docker immuables `X.Y.Z` et `X.Y` sur les deux registres.
+
+## Ce qui le différencie
+
+Les socket proxies classiques limitent principalement les familles d'endpoints Docker. Celui-ci ajoute deux niveaux de contrôle complémentaires :
+
+1. Le droit est attribué au **client** par profil, automatiquement via son label Docker (`socketproxy.role`).
+2. Le droit est ensuite limité à la **cible** : tous les conteneurs, allowlist, blacklist, refus explicite, ou accès strictement en lecture seule par conteneur.
+
+Un outil peut donc disposer d'un accès Docker étendu lorsque c'est nécessaire (Portainer, un opérateur), tandis que Traefik Manager peut uniquement consulter et redémarrer `traefik`. Le contrôle nom/ID est maintenu en cache et s'applique aux listes, événements et appels directs.
 
 ## Principes de sécurité
 
