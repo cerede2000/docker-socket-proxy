@@ -25,7 +25,7 @@ The `integration` branch publishes only the mutable `integration` tag. It never 
 
 The next release tightens several permissions and may require profile changes. Container inspection needs `allow_inspect: true`; creating exec sessions needs both `exec: true` and `post: true`; and scoped profiles cannot perform global image, volume, or network writes. Unknown CLI profile options are rejected so that a typo cannot silently produce an unintended policy.
 
-Review the complete migration checklist in [CHANGELOG.md](CHANGELOG.md) before moving an existing deployment from `1.1.2` or an older image. Test with the `integration` tag first, then use the immutable release tag when it is published.
+Review the complete migration checklist in [CHANGELOG.md](CHANGELOG.md) before moving an existing deployment from `1.1.2` or an older image. Test with the `integration` tag first; once the migration is validated and `v1.2.0` is published, pin the immutable `1.2.0` tag rather than `latest`.
 
 The published image is continuously analysed by [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). The live report is linked rather than hard-coded here, so its result always reflects current image and vulnerability data.
 
