@@ -110,6 +110,13 @@ func main() {
 	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
 		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
+	if err := serveUntilShutdown(ctx, stop, srv, logger); err != nil {
+		logger.Printf("[main] fatal server error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func serveUntilShutdown(ctx context.Context, stop context.CancelFunc, srv *http.Server, logger *log.Logger) error {
 	serverErrors := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -117,15 +124,20 @@ func main() {
 		}
 	}()
 
+	var serverErr error
 	select {
 	case <-ctx.Done():
 	case err := <-serverErrors:
 		logger.Printf("[main] http server error: %v", err)
+		serverErr = err
 		stop()
 	}
 	logger.Printf("[main] shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil && serverErr == nil {
+		return err
+	}
+	return serverErr
 }

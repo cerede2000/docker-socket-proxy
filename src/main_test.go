@@ -265,6 +265,17 @@ func TestContainerExecRequiresExecAndPost(t *testing.T) {
 	}
 }
 
+func TestServeUntilShutdownReturnsFatalListenError(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	srv := &http.Server{Addr: "invalid listen address"}
+
+	err := serveUntilShutdown(ctx, stop, srv, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("fatal listen error was reported as a clean shutdown")
+	}
+}
+
 func TestFeaturePermissionMatrix(t *testing.T) {
 	tests := map[string]ServiceConfig{
 		"ping": {Ping: true}, "version": {Version: true}, "info": {Info: true},
