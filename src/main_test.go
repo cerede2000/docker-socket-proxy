@@ -6,9 +6,25 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type blockingReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *blockingReadCloser) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingReadCloser) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
 
 func TestParseConfigUsesEnvironment(t *testing.T) {
 	t.Setenv("PROXY_PORT", "4242")
@@ -457,4 +473,52 @@ func TestFilterEventsPreservesDockerEventFields(t *testing.T) {
 	if !strings.Contains(got, `"timeNano":123456789000`) || !strings.Contains(got, `"FutureDockerField":"preserved"`) || strings.Contains(got, "docker-socket-proxy") {
 		t.Fatalf("unexpected filtered events: %s", got)
 	}
+}
+
+func TestFilterEventsUsesEventMetadataForUncachedContainers(t *testing.T) {
+	service := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+	}
+	for _, tc := range []struct {
+		name   string
+		action string
+		want   bool
+	}{
+		{name: "whoami", action: "create", want: true},
+		{name: "whoami", action: "destroy", want: true},
+		{name: "docker-socket-proxy", action: "create", want: false},
+	} {
+		t.Run(tc.action+"/"+tc.name, func(t *testing.T) {
+			cfg := &ProxyConfig{containersByRef: map[string]dockerContainerMeta{}}
+			body := `{"Type":"container","Action":"` + tc.action + `","Actor":{"ID":"new-id","Attributes":{"name":"` + tc.name + `","scope-label":"kept"}}}` + "\n"
+			resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+			filterEventsResponse(resp, cfg, service)
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(got) > 0) != tc.want {
+				t.Fatalf("event forwarded = %v, want %v; body=%s", len(got) > 0, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFilterEventsClosesDockerBodyWhenClientDisconnects(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &blockingReadCloser{closed: make(chan struct{})}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://proxy/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: req}
+	filterEventsResponse(resp, &ProxyConfig{}, &ServiceConfig{ContainerScope: "blacklist"})
+	cancel()
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Docker event body remained open after client cancellation")
+	}
+	_ = resp.Body.Close()
 }

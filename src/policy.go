@@ -558,12 +558,18 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 
 func filterContainerListResponse(resp *http.Response, cfg *ProxyConfig, service *ServiceConfig) {
 	originalBody := resp.Body
+	ctx := context.Background()
+	if resp.Request != nil {
+		ctx = resp.Request.Context()
+	}
+	stopClose := context.AfterFunc(ctx, func() { _ = originalBody.Close() })
 	reader, writer := io.Pipe()
 	resp.Body = reader
 	resp.ContentLength = -1
 	resp.Header.Del("Content-Length")
 
 	go func() {
+		defer stopClose()
 		defer originalBody.Close()
 		defer writer.Close()
 		decoder := json.NewDecoder(originalBody)
@@ -610,12 +616,18 @@ func filterContainerListResponse(resp *http.Response, cfg *ProxyConfig, service 
 
 func filterEventsResponse(resp *http.Response, cfg *ProxyConfig, service *ServiceConfig) {
 	originalBody := resp.Body
+	ctx := context.Background()
+	if resp.Request != nil {
+		ctx = resp.Request.Context()
+	}
+	stopClose := context.AfterFunc(ctx, func() { _ = originalBody.Close() })
 	reader, writer := io.Pipe()
 	resp.Body = reader
 	resp.ContentLength = -1
 	resp.Header.Del("Content-Length")
 
 	go func() {
+		defer stopClose()
 		defer originalBody.Close()
 		defer writer.Close()
 		decoder := json.NewDecoder(originalBody)
@@ -635,8 +647,19 @@ func filterEventsResponse(resp *http.Response, cfg *ProxyConfig, service *Servic
 			if event.Type != "container" {
 				continue
 			}
-			meta, ok := cfg.GetContainer(event.Actor.ID)
-			if !ok || !service.AllowsContainer(meta) {
+			meta := dockerContainerMeta{
+				ID:     event.Actor.ID,
+				Name:   normalizeContainerRef(event.Actor.Attributes["name"]),
+				Labels: event.Actor.Attributes,
+			}
+			if meta.Name == "" {
+				var ok bool
+				meta, ok = cfg.GetContainer(event.Actor.ID)
+				if !ok {
+					continue
+				}
+			}
+			if !service.AllowsContainer(meta) {
 				continue
 			}
 			if _, err := writer.Write(raw); err != nil {
