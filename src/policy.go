@@ -229,23 +229,23 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 	if feature == "containers" {
 		switch action {
 		case "archive":
-			if !s.AllowArchive {
+			if !s.AllowAll && !s.AllowArchive {
 				return false
 			}
 		case "changes":
-			if !s.AllowChanges {
+			if !s.AllowAll && !s.AllowChanges {
 				return false
 			}
 		case "export":
-			if !s.AllowExport {
+			if !s.AllowAll && !s.AllowExport {
 				return false
 			}
 		case "logs":
-			if !s.AllowLogs {
+			if !s.AllowAll && !s.AllowLogs {
 				return false
 			}
 		case "top":
-			if !s.AllowTop {
+			if !s.AllowAll && !s.AllowTop {
 				return false
 			}
 		}
@@ -260,17 +260,17 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 	if feature == "containers" {
 		switch action {
 		case "pause":
-			return s.AllowPause
+			return s.AllowAll || s.AllowPause
 		case "start":
-			return s.AllowStart
+			return s.AllowAll || s.AllowStart
 		case "stop":
-			return s.AllowStop
+			return s.AllowAll || s.AllowStop
 		case "restart":
-			return s.AllowRestart
+			return s.AllowAll || s.AllowRestart
 		case "unpause":
-			return s.AllowUnpause
+			return s.AllowAll || s.AllowUnpause
 		case "kill":
-			return s.AllowKill
+			return s.AllowAll || s.AllowKill
 		}
 	}
 
