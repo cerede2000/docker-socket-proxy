@@ -313,7 +313,6 @@ func (d *eventDebouncer) trigger() {
 		d.lastTrigger = time.Now()
 		d.pendingEvents = 0
 		d.mu.Unlock()
-		d.mu.Unlock()
 		d.callback()
 		return
 	}

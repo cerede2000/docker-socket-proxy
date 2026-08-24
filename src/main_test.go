@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,10 @@ type blockingReadCloser struct {
 	closed chan struct{}
 	once   sync.Once
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func (b *blockingReadCloser) Read([]byte) (int, error) {
 	<-b.closed
@@ -298,6 +304,89 @@ func TestExecCacheIsBoundedAndExpires(t *testing.T) {
 	}
 }
 
+func TestResolveExecContainerUsesInspectThenCache(t *testing.T) {
+	var requests []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.URL.Path)
+		body := `{"ContainerID":"container-id"}`
+		if strings.HasPrefix(r.URL.Path, "/containers/") {
+			body = `{"Id":"container-id","Name":"/demo"}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	cfg := &ProxyConfig{
+		containersByRef: make(map[string]dockerContainerMeta),
+		execToContainer: make(map[string]dockerExecCacheEntry),
+	}
+	meta, err := resolveExecContainer(context.Background(), cfg, client, "exec-id")
+	if err != nil || meta.Name != "demo" {
+		t.Fatalf("first resolve = %#v, %v", meta, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("first resolve made %d requests, want 2", len(requests))
+	}
+	if _, err := resolveExecContainer(context.Background(), cfg, client, "exec-id"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("cached resolve made an extra request: %v", requests)
+	}
+}
+
+func TestResolveExecContainerRejectsMissingContainerID(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	cfg := &ProxyConfig{containersByRef: make(map[string]dockerContainerMeta), execToContainer: make(map[string]dockerExecCacheEntry)}
+	if _, err := resolveExecContainer(context.Background(), cfg, client, "exec-id"); err == nil {
+		t.Fatal("exec inspect without ContainerID was accepted")
+	}
+}
+
+func TestEventDebouncerModes(t *testing.T) {
+	t.Run("zero delay", func(t *testing.T) {
+		calls := 0
+		d := newEventDebouncer(0, func() { calls++ })
+		d.trigger()
+		d.trigger()
+		if calls != 2 {
+			t.Fatalf("calls = %d, want 2", calls)
+		}
+	})
+
+	t.Run("first event immediate", func(t *testing.T) {
+		called := make(chan struct{}, 1)
+		d := newEventDebouncer(20*time.Millisecond, func() { called <- struct{}{} })
+		defer d.stop()
+		d.trigger()
+		select {
+		case <-called:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("first event was not immediate")
+		}
+	})
+
+	t.Run("burst coalesced", func(t *testing.T) {
+		called := make(chan struct{}, 3)
+		d := newEventDebouncer(20*time.Millisecond, func() { called <- struct{}{} })
+		defer d.stop()
+		d.trigger()
+		<-called
+		d.trigger()
+		d.trigger()
+		select {
+		case <-called:
+		case <-time.After(150 * time.Millisecond):
+			t.Fatal("burst callback did not run")
+		}
+		select {
+		case <-called:
+			t.Fatal("burst generated more than one delayed callback")
+		case <-time.After(40 * time.Millisecond):
+		}
+	})
+}
+
 func TestScopeResponseFilterRejectsCompressedBodies(t *testing.T) {
 	ctx := context.WithValue(context.Background(), responseFilterContextKey{}, &responseFilterContext{
 		service: &ServiceConfig{}, kind: filterContainerList,
@@ -323,6 +412,65 @@ func TestRewriteAPIVersion(t *testing.T) {
 		if got := rewriteAPIVersion(input, "1.51"); got != want {
 			t.Errorf("rewriteAPIVersion(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestTrimAPIVersionBoundaries(t *testing.T) {
+	tests := map[string]string{
+		"/v1.51":                         "/v1.51",
+		"/version":                       "/version",
+		"/versionfoo":                    "/versionfoo",
+		"/engine/api/v1.51/containers/x": "/containers/x",
+	}
+	for input, want := range tests {
+		if got := pathWithoutAPIVersion(input); got != want {
+			t.Errorf("pathWithoutAPIVersion(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestProxyHandlerDenialsHealthAndAPIRewrite(t *testing.T) {
+	upstreamPaths := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPaths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	cfg := &ProxyConfig{
+		ipToRole: map[string]string{"192.0.2.20": "missing", "192.0.2.30": "client"},
+		services: map[string]*ServiceConfig{"client": {Version: true, APIRewrite: "1.51"}},
+	}
+	handler := proxyHandler(cfg, nil, proxy, log.New(io.Discard, "", 0))
+
+	request := func(remote, path string) int {
+		req := httptest.NewRequest(http.MethodGet, "http://proxy"+path, nil)
+		req.RemoteAddr = remote
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if got := request("192.0.2.10:1", "/version"); got != http.StatusForbidden {
+		t.Fatalf("unknown IP status = %d", got)
+	}
+	if got := request("192.0.2.20:1", "/version"); got != http.StatusForbidden {
+		t.Fatalf("missing profile status = %d", got)
+	}
+	if got := request("127.0.0.1:1", "/version"); got != http.StatusOK {
+		t.Fatalf("local health status = %d", got)
+	}
+	if got := <-upstreamPaths; got != "/version" {
+		t.Fatalf("health path = %q", got)
+	}
+	if got := request("192.0.2.30:1", "/version"); got != http.StatusOK {
+		t.Fatalf("authorized status = %d", got)
+	}
+	if got := <-upstreamPaths; got != "/v1.51/version" {
+		t.Fatalf("rewritten path = %q", got)
 	}
 }
 
