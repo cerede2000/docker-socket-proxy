@@ -87,7 +87,12 @@ func TestClassifyPath(t *testing.T) {
 		{"/v1.51/containers/id/changes", "containers", "changes"},
 		{"/v1.51/containers/id/archive", "containers", "archive"},
 		{"/v1.51/containers/id/export", "containers", "export"},
+		{"/v1.51/containers/id/json", "containers", "inspect"},
 		{"/v1.51/exec/id/start", "exec", ""},
+		{"/engine/api/v1.51/containers/json", "containers", ""},
+		{"/containersfoo/json", "unknown", ""},
+		{"/eventsfoo", "unknown", ""},
+		{"/containers/../secrets/id", "unknown", ""},
 		{"/not-a-docker-endpoint", "unknown", ""},
 	}
 
@@ -165,6 +170,7 @@ func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
 		{"archive", &service.AllowArchive},
 		{"changes", &service.AllowChanges},
 		{"export", &service.AllowExport},
+		{"inspect", &service.AllowInspect},
 		{"logs", &service.AllowLogs},
 		{"top", &service.AllowTop},
 	}
@@ -187,7 +193,7 @@ func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
 
 func TestAllowAllOnlyExpandsTargetedContainerPermissions(t *testing.T) {
 	service := &ServiceConfig{Containers: true, AllowAll: true}
-	for _, action := range []string{"archive", "changes", "export", "logs", "top"} {
+	for _, action := range []string{"archive", "changes", "export", "inspect", "logs", "top"} {
 		if !service.Allow("containers", http.MethodGet, action) {
 			t.Errorf("allow_all did not grant container read %q", action)
 		}
@@ -202,6 +208,50 @@ func TestAllowAllOnlyExpandsTargetedContainerPermissions(t *testing.T) {
 	}
 	if service.Allow("images", http.MethodGet, "") {
 		t.Fatal("allow_all unexpectedly enabled another API family")
+	}
+}
+
+func TestContainerExecRequiresExecAndPost(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		service ServiceConfig
+		want    bool
+	}{
+		{"neither", ServiceConfig{Containers: true}, false},
+		{"post only", ServiceConfig{Containers: true, Post: true}, false},
+		{"exec only", ServiceConfig{Containers: true, Exec: true}, false},
+		{"both", ServiceConfig{Containers: true, Exec: true, Post: true}, true},
+		{"allow all without exec", ServiceConfig{Containers: true, AllowAll: true, Post: true}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.service.Allow("containers", http.MethodPost, "exec"); got != tt.want {
+				t.Fatalf("Allow(container exec) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFeaturePermissionMatrix(t *testing.T) {
+	tests := map[string]ServiceConfig{
+		"ping": {Ping: true}, "version": {Version: true}, "info": {Info: true},
+		"events": {Events: true}, "auth": {Auth: true}, "build": {Build: true},
+		"commit": {Commit: true}, "configs": {Configs: true}, "containers": {Containers: true},
+		"distribution": {Distribution: true}, "exec": {Exec: true}, "images": {Images: true},
+		"networks": {Networks: true}, "nodes": {Nodes: true}, "plugins": {Plugins: true},
+		"secrets": {Secrets: true}, "services": {Services: true}, "session": {Session: true},
+		"swarm": {Swarm: true}, "system": {System: true}, "tasks": {Tasks: true},
+		"volumes": {Volumes: true},
+	}
+	if len(tests) != len(featurePermissions) {
+		t.Fatalf("feature matrix has %d cases for %d permissions", len(tests), len(featurePermissions))
+	}
+	for feature, granted := range tests {
+		if (&ServiceConfig{}).Allow(feature, http.MethodGet, "") {
+			t.Errorf("%s allowed without its feature grant", feature)
+		}
+		if !granted.Allow(feature, http.MethodGet, "") {
+			t.Errorf("%s denied with its feature grant", feature)
+		}
 	}
 }
 

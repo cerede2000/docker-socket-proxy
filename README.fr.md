@@ -226,6 +226,7 @@ Les écritures génériques (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdite
 | `allow_archive` | `/containers/{id}/archive` | GET/HEAD : non ; PUT : oui |
 | `allow_changes` | `/containers/{id}/changes` | non |
 | `allow_export` | `/containers/{id}/export` | non |
+| `allow_inspect` | `/containers/{id}/json` | non |
 | `allow_logs` | `/containers/{id}/logs` | non |
 | `allow_top` | `/containers/{id}/top` | non |
 | `allow_start` | `/containers/{id}/start` | non |
@@ -236,6 +237,8 @@ Les écritures génériques (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdite
 | `allow_kill` | `/containers/{id}/kill` | non |
 
 Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias de `allow_restart` ; contrairement au commutateur groupé de LinuxServer, il n'accorde pas implicitement `stop` ou `kill`. Ces droits doivent être explicitement ajoutés.
+
+La création d'une session exec via `POST /containers/{id}/exec` exige les trois droits explicites `containers: true`, `exec: true` et `post: true`. `allow_all` n'active jamais `exec`.
 
 `allow_all: true` est un raccourci pour toutes les options `allow_*` du tableau. Ce n'est volontairement **pas** un droit Docker global : il n'active ni `containers`, ni `post`, ni une autre famille d'API et ne contourne pas les portées de conteneurs. L'envoi d'une archive et les autres écritures génériques nécessitent donc toujours `post: true`.
 

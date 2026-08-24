@@ -8,8 +8,38 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	pathpkg "path"
 	"strings"
 )
+
+func hasDotDotSegment(p string) bool {
+	for _, segment := range strings.Split(p, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedDockerPath(rawPath string) (string, bool) {
+	if i := strings.Index(rawPath, "?"); i >= 0 {
+		rawPath = rawPath[:i]
+	}
+	if hasDotDotSegment(rawPath) {
+		return "", false
+	}
+	p := pathpkg.Clean("/" + strings.TrimPrefix(rawPath, "/"))
+	if p == "/engine/api" {
+		p = "/"
+	} else if strings.HasPrefix(p, "/engine/api/") {
+		p = strings.TrimPrefix(p, "/engine/api")
+	}
+	return trimAPIVersion(p), true
+}
+
+func routeFamily(p, family string) bool {
+	return p == family || strings.HasPrefix(p, family+"/")
+}
 
 func trimAPIVersion(path string) string {
 	if !strings.HasPrefix(path, "/v") {
@@ -34,14 +64,9 @@ func trimAPIVersion(path string) string {
 }
 
 func classifyPath(path string) (feature string, action string) {
-	if i := strings.Index(path, "?"); i >= 0 {
-		path = path[:i]
-	}
-
-	p := trimAPIVersion(path)
-
-	if strings.HasPrefix(p, "/engine/api/") {
-		p = strings.TrimPrefix(p, "/engine/api")
+	p, ok := normalizedDockerPath(path)
+	if !ok {
+		return "unknown", ""
 	}
 
 	switch {
@@ -51,17 +76,17 @@ func classifyPath(path string) (feature string, action string) {
 		return "version", ""
 	case p == "/info" || strings.HasPrefix(p, "/info/"):
 		return "info", ""
-	case strings.HasPrefix(p, "/events"):
+	case routeFamily(p, "/events"):
 		return "events", ""
-	case strings.HasPrefix(p, "/auth"):
+	case routeFamily(p, "/auth"):
 		return "auth", ""
-	case strings.HasPrefix(p, "/build"):
+	case routeFamily(p, "/build"):
 		return "build", ""
-	case strings.HasPrefix(p, "/commit"):
+	case routeFamily(p, "/commit"):
 		return "commit", ""
-	case strings.HasPrefix(p, "/configs"):
+	case routeFamily(p, "/configs"):
 		return "configs", ""
-	case strings.HasPrefix(p, "/containers"):
+	case routeFamily(p, "/containers"):
 		segs := strings.Split(strings.Trim(p, "/"), "/")
 		if len(segs) >= 3 {
 			switch segs[2] {
@@ -89,37 +114,82 @@ func classifyPath(path string) (feature string, action string) {
 				return "containers", "kill"
 			case "exec":
 				return "containers", "exec"
+			case "json":
+				return "containers", "inspect"
 			}
 		}
 		return "containers", ""
-	case strings.HasPrefix(p, "/distribution"):
+	case routeFamily(p, "/distribution"):
 		return "distribution", ""
-	case strings.HasPrefix(p, "/exec"):
+	case routeFamily(p, "/exec"):
 		return "exec", ""
-	case strings.HasPrefix(p, "/images"):
+	case routeFamily(p, "/images"):
 		return "images", ""
-	case strings.HasPrefix(p, "/networks"):
+	case routeFamily(p, "/networks"):
 		return "networks", ""
-	case strings.HasPrefix(p, "/nodes"):
+	case routeFamily(p, "/nodes"):
 		return "nodes", ""
-	case strings.HasPrefix(p, "/plugins"):
+	case routeFamily(p, "/plugins"):
 		return "plugins", ""
-	case strings.HasPrefix(p, "/secrets"):
+	case routeFamily(p, "/secrets"):
 		return "secrets", ""
-	case strings.HasPrefix(p, "/services"):
+	case routeFamily(p, "/services"):
 		return "services", ""
-	case strings.HasPrefix(p, "/session"):
+	case routeFamily(p, "/session"):
 		return "session", ""
-	case strings.HasPrefix(p, "/swarm"):
+	case routeFamily(p, "/swarm"):
 		return "swarm", ""
-	case strings.HasPrefix(p, "/system"):
+	case routeFamily(p, "/system"):
 		return "system", ""
-	case strings.HasPrefix(p, "/tasks"):
+	case routeFamily(p, "/tasks"):
 		return "tasks", ""
-	case strings.HasPrefix(p, "/volumes"):
+	case routeFamily(p, "/volumes"):
 		return "volumes", ""
 	}
 	return "unknown", ""
+}
+
+var featurePermissions = map[string]func(*ServiceConfig) bool{
+	"ping":         func(s *ServiceConfig) bool { return s.Ping },
+	"version":      func(s *ServiceConfig) bool { return s.Version },
+	"info":         func(s *ServiceConfig) bool { return s.Info },
+	"events":       func(s *ServiceConfig) bool { return s.Events },
+	"auth":         func(s *ServiceConfig) bool { return s.Auth },
+	"build":        func(s *ServiceConfig) bool { return s.Build },
+	"commit":       func(s *ServiceConfig) bool { return s.Commit },
+	"configs":      func(s *ServiceConfig) bool { return s.Configs },
+	"containers":   func(s *ServiceConfig) bool { return s.Containers },
+	"distribution": func(s *ServiceConfig) bool { return s.Distribution },
+	"exec":         func(s *ServiceConfig) bool { return s.Exec },
+	"images":       func(s *ServiceConfig) bool { return s.Images },
+	"networks":     func(s *ServiceConfig) bool { return s.Networks },
+	"nodes":        func(s *ServiceConfig) bool { return s.Nodes },
+	"plugins":      func(s *ServiceConfig) bool { return s.Plugins },
+	"secrets":      func(s *ServiceConfig) bool { return s.Secrets },
+	"services":     func(s *ServiceConfig) bool { return s.Services },
+	"session":      func(s *ServiceConfig) bool { return s.Session },
+	"swarm":        func(s *ServiceConfig) bool { return s.Swarm },
+	"system":       func(s *ServiceConfig) bool { return s.System },
+	"tasks":        func(s *ServiceConfig) bool { return s.Tasks },
+	"volumes":      func(s *ServiceConfig) bool { return s.Volumes },
+}
+
+var containerReadPermissions = map[string]func(*ServiceConfig) bool{
+	"archive": func(s *ServiceConfig) bool { return s.AllowAll || s.AllowArchive },
+	"changes": func(s *ServiceConfig) bool { return s.AllowAll || s.AllowChanges },
+	"export":  func(s *ServiceConfig) bool { return s.AllowAll || s.AllowExport },
+	"inspect": func(s *ServiceConfig) bool { return s.AllowAll || s.AllowInspect },
+	"logs":    func(s *ServiceConfig) bool { return s.AllowAll || s.AllowLogs },
+	"top":     func(s *ServiceConfig) bool { return s.AllowAll || s.AllowTop },
+}
+
+var containerWritePermissions = map[string]func(*ServiceConfig) bool{
+	"pause":   func(s *ServiceConfig) bool { return s.AllowAll || s.AllowPause },
+	"start":   func(s *ServiceConfig) bool { return s.AllowAll || s.AllowStart },
+	"stop":    func(s *ServiceConfig) bool { return s.AllowAll || s.AllowStop },
+	"restart": func(s *ServiceConfig) bool { return s.AllowAll || s.AllowRestart },
+	"unpause": func(s *ServiceConfig) bool { return s.AllowAll || s.AllowUnpause },
+	"kill":    func(s *ServiceConfig) bool { return s.AllowAll || s.AllowKill },
 }
 
 func (s *ServiceConfig) Allow(feature, method, action string) bool {
@@ -130,124 +200,14 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 		return false
 	}
 
-	switch feature {
-	case "ping":
-		if !s.Ping {
-			return false
-		}
-	case "version":
-		if !s.Version {
-			return false
-		}
-	case "info":
-		if !s.Info {
-			return false
-		}
-	case "events":
-		if !s.Events {
-			return false
-		}
-	case "auth":
-		if !s.Auth {
-			return false
-		}
-	case "build":
-		if !s.Build {
-			return false
-		}
-	case "commit":
-		if !s.Commit {
-			return false
-		}
-	case "configs":
-		if !s.Configs {
-			return false
-		}
-	case "containers":
-		if !s.Containers {
-			return false
-		}
-	case "distribution":
-		if !s.Distribution {
-			return false
-		}
-	case "exec":
-		if !s.Exec {
-			return false
-		}
-	case "images":
-		if !s.Images {
-			return false
-		}
-	case "networks":
-		if !s.Networks {
-			return false
-		}
-	case "nodes":
-		if !s.Nodes {
-			return false
-		}
-	case "plugins":
-		if !s.Plugins {
-			return false
-		}
-	case "secrets":
-		if !s.Secrets {
-			return false
-		}
-	case "services":
-		if !s.Services {
-			return false
-		}
-	case "session":
-		if !s.Session {
-			return false
-		}
-	case "swarm":
-		if !s.Swarm {
-			return false
-		}
-	case "system":
-		if !s.System {
-			return false
-		}
-	case "tasks":
-		if !s.Tasks {
-			return false
-		}
-	case "volumes":
-		if !s.Volumes {
-			return false
-		}
-	default:
+	featureAllowed, known := featurePermissions[feature]
+	if !known || !featureAllowed(s) {
 		return false
 	}
 
-	// Sensitive container reads require their own explicit permission, even
-	// when the containers family is enabled. This prevents accidental log or
-	// filesystem disclosure from a broad read profile.
-	if feature == "containers" {
-		switch action {
-		case "archive":
-			if !s.AllowAll && !s.AllowArchive {
-				return false
-			}
-		case "changes":
-			if !s.AllowAll && !s.AllowChanges {
-				return false
-			}
-		case "export":
-			if !s.AllowAll && !s.AllowExport {
-				return false
-			}
-		case "logs":
-			if !s.AllowAll && !s.AllowLogs {
-				return false
-			}
-		case "top":
-			if !s.AllowAll && !s.AllowTop {
-				return false
-			}
+	if feature == "containers" && isRead {
+		if permission, protected := containerReadPermissions[action]; protected {
+			return permission(s)
 		}
 	}
 
@@ -255,22 +215,15 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 		return true
 	}
 
-	// Explicit lifecycle permissions are deliberately narrower than post and
-	// remain usable while post=false. Generic writes still require post=true.
 	if feature == "containers" {
-		switch action {
-		case "pause":
-			return s.AllowAll || s.AllowPause
-		case "start":
-			return s.AllowAll || s.AllowStart
-		case "stop":
-			return s.AllowAll || s.AllowStop
-		case "restart":
-			return s.AllowAll || s.AllowRestart
-		case "unpause":
-			return s.AllowAll || s.AllowUnpause
-		case "kill":
-			return s.AllowAll || s.AllowKill
+		if permission, targeted := containerWritePermissions[action]; targeted {
+			return permission(s)
+		}
+		// Creating an exec session is both a generic Docker write and an exec
+		// capability. Requiring both permissions prevents post from silently
+		// becoming remote command execution.
+		if action == "exec" {
+			return s.Post && s.Exec
 		}
 	}
 
@@ -376,9 +329,9 @@ func resolveExecContainer(ctx context.Context, cfg *ProxyConfig, client *http.Cl
 }
 
 func pathWithoutAPIVersion(path string) string {
-	p := trimAPIVersion(path)
-	if strings.HasPrefix(p, "/engine/api/") {
-		return strings.TrimPrefix(p, "/engine/api")
+	p, ok := normalizedDockerPath(path)
+	if !ok {
+		return ""
 	}
 	return p
 }

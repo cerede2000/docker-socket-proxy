@@ -37,6 +37,7 @@ type ServiceConfig struct {
 	AllowArchive bool
 	AllowChanges bool
 	AllowExport  bool
+	AllowInspect bool
 	AllowLogs    bool
 	AllowPause   bool
 	AllowRestart bool

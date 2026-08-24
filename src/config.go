@@ -121,6 +121,8 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 		s.AllowChanges = b
 	case "allow_export":
 		s.AllowExport = b
+	case "allow_inspect":
+		s.AllowInspect = b
 	case "allow_logs":
 		s.AllowLogs = b
 	case "allow_pause":
@@ -456,7 +458,7 @@ var knownProfileKeys = map[string]struct{}{
 	"build": {}, "commit": {}, "configs": {}, "containers": {}, "distribution": {},
 	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
 	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
-	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_logs": {},
+	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_inspect": {}, "allow_logs": {},
 	"allow_pause": {}, "allow_restart": {}, "allow_restarts": {}, "allow_start": {}, "allow_stop": {},
 	"allow_top": {}, "allow_unpause": {}, "allow_kill": {},
 	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},

@@ -225,6 +225,7 @@ Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even i
 | `allow_archive` | `/containers/{id}/archive` | GET/HEAD: no; PUT: yes |
 | `allow_changes` | `/containers/{id}/changes` | no |
 | `allow_export` | `/containers/{id}/export` | no |
+| `allow_inspect` | `/containers/{id}/json` | no |
 | `allow_logs` | `/containers/{id}/logs` | no |
 | `allow_top` | `/containers/{id}/top` | no |
 | `allow_start` | `/containers/{id}/start` | no |
@@ -235,6 +236,8 @@ Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even i
 | `allow_kill` | `/containers/{id}/kill` | no |
 
 All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required.
+
+Creating an exec session with `POST /containers/{id}/exec` requires all three explicit grants: `containers: true`, `exec: true`, and `post: true`. `allow_all` never enables `exec`.
 
 `allow_all: true` is a convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`.
 
