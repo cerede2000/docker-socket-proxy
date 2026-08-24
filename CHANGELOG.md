@@ -2,7 +2,7 @@
 
 All notable changes are documented here. Release tags use semantic versioning.
 
-## Unreleased
+## 1.2.0 - 2026-08-24
 
 ### Security
 
@@ -18,7 +18,7 @@ All notable changes are documented here. Release tags use semantic versioning.
 - Use an unscoped, explicitly privileged profile only when a client genuinely needs global image, volume, or network writes.
 - Unknown CLI profile options are rejected during startup rather than being silently ignored. Correct any reported typo before restarting.
 
-These changes are scheduled for `1.2.0`. Test the profile migration with the `integration` image first; once `v1.2.0` is published, pin the immutable `1.2.0` tag instead of relying on `latest`.
+Review and apply the migration notes before upgrading, then pin the immutable `1.2.0` tag instead of relying on `latest`.
 
 ## 1.1.2
 
