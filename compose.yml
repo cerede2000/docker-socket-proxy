@@ -1,8 +1,8 @@
 services:
   docker-socket-proxy:
-    image: ghcr.io/cerede2000/docker-socket-proxy:latest
+    image: cerede2000/docker-socket-proxy:latest
     container_name: docker-socket-proxy
-    user: "107:108"
+    user: "1000:998" # adapt to an UID:GID allowed to read the host socket
     read_only: true
     cap_drop:
       - ALL
@@ -12,15 +12,11 @@ services:
       - /tmp
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/profiles.yml:/config/profiles.yml:ro
     networks:
-      - traefikfront
-    command:
-      - --dockerproxy-traefik.ping=1
-      - --dockerproxy-traefik.version=1
-      - --dockerproxy-watchtower.info=1
-      - --dockerproxy-watchtower.events=1
+      - socketproxy
     restart: unless-stopped
 
 networks:
-  traefikfront:
-    external: true
+  socketproxy:
+    internal: true

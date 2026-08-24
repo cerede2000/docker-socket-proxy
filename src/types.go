@@ -33,9 +33,19 @@ type ServiceConfig struct {
 	Volumes      bool
 
 	Post         bool
+	AllowAll     bool
+	AllowArchive bool
+	AllowChanges bool
+	AllowExport  bool
+	AllowInspect bool
+	AllowLogs    bool
+	AllowPause   bool
+	AllowRestart bool
 	AllowStart   bool
 	AllowStop    bool
-	AllowRestart bool
+	AllowTop     bool
+	AllowUnpause bool
+	AllowKill    bool
 
 	APIRewrite string // Version d'API à forcer (ex: "1.51")
 
@@ -73,12 +83,13 @@ type ProxyConfig struct {
 	services map[string]*ServiceConfig // effectif (CLI + YAML)
 	ipToRole map[string]string         // IP -> nom de rôle
 
-	selfNetworks     map[string]struct{} // réseaux du conteneur socket-proxy (immuable après init)
-	selfNetworksHash string              // hash des réseaux pour cache DNS
+	selfNetworks     map[string]struct{}
+	selfNetworksHash string
 
-	containerMu     sync.RWMutex
-	containersByRef map[string]dockerContainerMeta
-	execToContainer map[string]string
+	containerMu       sync.RWMutex
+	containersByRef   map[string]dockerContainerMeta
+	missingContainers map[string]time.Time
+	execToContainer   map[string]dockerExecCacheEntry
 }
 
 // Getters thread-safe
@@ -117,6 +128,7 @@ func (c *ProxyConfig) SetContainerIndex(m map[string]dockerContainerMeta) {
 	c.containerMu.Lock()
 	defer c.containerMu.Unlock()
 	c.containersByRef = m
+	c.missingContainers = make(map[string]time.Time)
 }
 
 func (c *ProxyConfig) GetContainer(ref string) (dockerContainerMeta, bool) {
@@ -129,27 +141,112 @@ func (c *ProxyConfig) GetContainer(ref string) (dockerContainerMeta, bool) {
 func (c *ProxyConfig) UpsertContainer(meta dockerContainerMeta) {
 	c.containerMu.Lock()
 	defer c.containerMu.Unlock()
-	next := make(map[string]dockerContainerMeta, len(c.containersByRef)+3)
-	for k, v := range c.containersByRef {
-		next[k] = v
+	if c.containersByRef == nil {
+		c.containersByRef = make(map[string]dockerContainerMeta)
 	}
 	for _, ref := range meta.refs() {
-		next[ref] = meta
+		c.containersByRef[ref] = meta
+		delete(c.missingContainers, ref)
 	}
-	c.containersByRef = next
+}
+
+func (c *ProxyConfig) ContainerRecentlyMissing(ref string) bool {
+	c.containerMu.Lock()
+	defer c.containerMu.Unlock()
+	key := normalizeContainerRef(ref)
+	expiresAt, ok := c.missingContainers[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiresAt) {
+		delete(c.missingContainers, key)
+		return false
+	}
+	return true
+}
+
+func (c *ProxyConfig) MarkContainerMissing(ref string) {
+	c.containerMu.Lock()
+	defer c.containerMu.Unlock()
+	if c.missingContainers == nil {
+		c.missingContainers = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for key, expiresAt := range c.missingContainers {
+		if now.After(expiresAt) {
+			delete(c.missingContainers, key)
+		}
+	}
+	if len(c.missingContainers) >= maxMissingContainerEntries {
+		for key := range c.missingContainers {
+			delete(c.missingContainers, key)
+			break
+		}
+	}
+	c.missingContainers[normalizeContainerRef(ref)] = now.Add(missingContainerTTL)
 }
 
 func (c *ProxyConfig) SetExecContainer(execID, containerID string) {
 	c.containerMu.Lock()
 	defer c.containerMu.Unlock()
-	c.execToContainer[execID] = containerID
+	now := time.Now()
+	for id, entry := range c.execToContainer {
+		if now.After(entry.ExpiresAt) {
+			delete(c.execToContainer, id)
+		}
+	}
+	if len(c.execToContainer) >= maxExecCacheEntries {
+		var oldestID string
+		var oldest time.Time
+		for id, entry := range c.execToContainer {
+			if oldestID == "" || entry.CreatedAt.Before(oldest) {
+				oldestID, oldest = id, entry.CreatedAt
+			}
+		}
+		delete(c.execToContainer, oldestID)
+	}
+	c.execToContainer[execID] = dockerExecCacheEntry{ContainerID: containerID, CreatedAt: now, ExpiresAt: now.Add(execCacheTTL)}
 }
 
 func (c *ProxyConfig) GetExecContainer(execID string) (string, bool) {
-	c.containerMu.RLock()
-	defer c.containerMu.RUnlock()
-	containerID, ok := c.execToContainer[execID]
-	return containerID, ok
+	c.containerMu.Lock()
+	defer c.containerMu.Unlock()
+	entry, ok := c.execToContainer[execID]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		delete(c.execToContainer, execID)
+		return "", false
+	}
+	return entry.ContainerID, true
+}
+
+const (
+	execCacheTTL               = 15 * time.Minute
+	maxExecCacheEntries        = 4096
+	missingContainerTTL        = 10 * time.Second
+	maxMissingContainerEntries = 1024
+)
+
+type dockerExecCacheEntry struct {
+	ContainerID string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+}
+
+func (c *ProxyConfig) updateSelfNetworks(nets map[string]struct{}, hash string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.selfNetworksHash != "" && c.selfNetworksHash == hash {
+		return false
+	}
+	c.selfNetworks = cloneStringSet(nets)
+	c.selfNetworksHash = hash
+	return true
+}
+
+func (c *ProxyConfig) getSelfNetworks() map[string]struct{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneStringSet(c.selfNetworks)
 }
 
 // -----------------------------
@@ -176,15 +273,11 @@ type dockerContainerInspect struct {
 	ID              string                      `json:"Id"`
 	Name            string                      `json:"Name"`
 	NetworkSettings dockerContainerNetworkBlock `json:"NetworkSettings"`
-	Config          struct {
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
 }
 
 type dockerContainerMeta struct {
-	ID     string
-	Name   string
-	Labels map[string]string
+	ID   string
+	Name string
 }
 
 func normalizeContainerRef(ref string) string {

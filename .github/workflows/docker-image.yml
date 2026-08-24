@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - integration
     tags:
       - "v*"
   pull_request:
@@ -38,8 +39,31 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2026.2.1"
+          install-go: false
+          use-cache: false
+
       - name: Test
         run: go test -race ./...
+
+      - name: Vulnerability audit
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          sbom: false
 
   publish:
     if: github.event_name != 'pull_request'
@@ -48,6 +72,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -60,32 +87,41 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Prepare optional Docker Hub image
+        id: dockerhub
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            echo "image=$DOCKERHUB_USERNAME/docker-socket-proxy" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/docker-socket-proxy
+            ${{ steps.dockerhub.outputs.image }}
           flavor: |
             latest=false
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=integration,enable=${{ github.ref == 'refs/heads/integration' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push production image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -101,3 +137,22 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign published images
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          if [ -z "$TAGS" ]; then
+            echo "no tags to sign"
+            exit 0
+          fi
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            cosign sign --yes "$tag@$DIGEST"
+          done <<EOF
+          $TAGS
+          EOF

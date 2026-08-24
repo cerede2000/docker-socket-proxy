@@ -1,21 +1,49 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type blockingReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func (b *blockingReadCloser) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingReadCloser) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
 
 func TestParseConfigUsesEnvironment(t *testing.T) {
 	t.Setenv("PROXY_PORT", "4242")
 	t.Setenv("DOCKER_SOCKET_PATH", "/run/custom.sock")
 	t.Setenv("SOCKETPROXY_PROFILE_FILE", "/tmp/profiles.yml")
 
-	cfg := parseConfig(nil, log.New(io.Discard, "", 0))
+	cfg, err := parseConfig(nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Listen != ":4242" {
 		t.Fatalf("Listen = %q, want %q", cfg.Listen, ":4242")
 	}
@@ -31,12 +59,21 @@ func TestParseConfigCLIOverridesEnvironment(t *testing.T) {
 	t.Setenv("PROXY_PORT", "4242")
 	t.Setenv("DOCKER_SOCKET_PATH", "/run/env.sock")
 
-	cfg := parseConfig([]string{"--listen=:5252", "--socket=/run/cli.sock"}, log.New(io.Discard, "", 0))
+	cfg, err := parseConfig([]string{"--listen=:5252", "--socket=/run/cli.sock"}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Listen != ":5252" {
 		t.Fatalf("Listen = %q, want %q", cfg.Listen, ":5252")
 	}
 	if cfg.SocketPath != "/run/cli.sock" {
 		t.Fatalf("SocketPath = %q, want %q", cfg.SocketPath, "/run/cli.sock")
+	}
+}
+
+func TestParseConfigRejectsUnknownProfileOption(t *testing.T) {
+	if _, err := parseConfig([]string{"--traefik.pingg=1"}, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("unknown CLI profile option was accepted")
 	}
 }
 
@@ -63,7 +100,20 @@ func TestClassifyPath(t *testing.T) {
 		{"/v1.51/containers/json", "containers", ""},
 		{"/v1.51/containers/id/start", "containers", "start"},
 		{"/v1.51/containers/id/restart", "containers", "restart"},
+		{"/v1.51/containers/id/pause", "containers", "pause"},
+		{"/v1.51/containers/id/unpause", "containers", "unpause"},
+		{"/v1.51/containers/id/kill", "containers", "kill"},
+		{"/v1.51/containers/id/logs", "containers", "logs"},
+		{"/v1.51/containers/id/top", "containers", "top"},
+		{"/v1.51/containers/id/changes", "containers", "changes"},
+		{"/v1.51/containers/id/archive", "containers", "archive"},
+		{"/v1.51/containers/id/export", "containers", "export"},
+		{"/v1.51/containers/id/json", "containers", "inspect"},
 		{"/v1.51/exec/id/start", "exec", ""},
+		{"/engine/api/v1.51/containers/json", "containers", ""},
+		{"/containersfoo/json", "unknown", ""},
+		{"/eventsfoo", "unknown", ""},
+		{"/containers/../secrets/id", "unknown", ""},
 		{"/not-a-docker-endpoint", "unknown", ""},
 	}
 
@@ -112,6 +162,300 @@ func TestAllowReadAndWritePermissions(t *testing.T) {
 	}
 }
 
+func TestLifecyclePermissionsDoNotRequireBroadPost(t *testing.T) {
+	service := &ServiceConfig{
+		Containers:   true,
+		AllowStart:   true,
+		AllowStop:    true,
+		AllowRestart: true,
+		AllowPause:   true,
+		AllowUnpause: true,
+		AllowKill:    true,
+	}
+	for _, action := range []string{"start", "stop", "restart", "pause", "unpause", "kill"} {
+		if !service.Allow("containers", http.MethodPost, action) {
+			t.Errorf("explicit lifecycle action %q was denied while post=false", action)
+		}
+	}
+	if service.Allow("containers", http.MethodPost, "rename") {
+		t.Fatal("generic container write was allowed while post=false")
+	}
+}
+
+func TestSensitiveContainerRoutesAreExplicitlyGated(t *testing.T) {
+	service := &ServiceConfig{Containers: true, Post: true}
+	tests := []struct {
+		action string
+		allow  *bool
+	}{
+		{"archive", &service.AllowArchive},
+		{"changes", &service.AllowChanges},
+		{"export", &service.AllowExport},
+		{"inspect", &service.AllowInspect},
+		{"logs", &service.AllowLogs},
+		{"top", &service.AllowTop},
+	}
+	for _, tt := range tests {
+		if service.Allow("containers", http.MethodGet, tt.action) {
+			t.Errorf("sensitive read %q was allowed by containers alone", tt.action)
+		}
+		*tt.allow = true
+		if !service.Allow("containers", http.MethodGet, tt.action) {
+			t.Errorf("sensitive read %q was denied after explicit grant", tt.action)
+		}
+		*tt.allow = false
+	}
+
+	for _, tt := range []struct {
+		name    string
+		service ServiceConfig
+		want    bool
+	}{
+		{"neither permission", ServiceConfig{Containers: true}, false},
+		{"post only", ServiceConfig{Containers: true, Post: true}, false},
+		{"archive only", ServiceConfig{Containers: true, AllowArchive: true}, false},
+		{"archive and post", ServiceConfig{Containers: true, AllowArchive: true, Post: true}, true},
+		{"allow_all only", ServiceConfig{Containers: true, AllowAll: true}, false},
+		{"allow_all and post", ServiceConfig{Containers: true, AllowAll: true, Post: true}, true},
+	} {
+		t.Run("archive upload "+tt.name, func(t *testing.T) {
+			if got := tt.service.Allow("containers", http.MethodPut, "archive"); got != tt.want {
+				t.Fatalf("archive upload permission = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllowAllOnlyExpandsTargetedContainerPermissions(t *testing.T) {
+	service := &ServiceConfig{Containers: true, AllowAll: true}
+	for _, action := range []string{"archive", "changes", "export", "inspect", "logs", "top"} {
+		if !service.Allow("containers", http.MethodGet, action) {
+			t.Errorf("allow_all did not grant container read %q", action)
+		}
+	}
+	for _, action := range []string{"start", "stop", "restart", "pause", "unpause", "kill"} {
+		if !service.Allow("containers", http.MethodPost, action) {
+			t.Errorf("allow_all did not grant lifecycle action %q", action)
+		}
+	}
+	if service.Allow("containers", http.MethodPost, "rename") {
+		t.Fatal("allow_all unexpectedly bypassed post for a generic write")
+	}
+	if service.Allow("images", http.MethodGet, "") {
+		t.Fatal("allow_all unexpectedly enabled another API family")
+	}
+}
+
+func TestContainerExecRequiresExecAndPost(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		service ServiceConfig
+		want    bool
+	}{
+		{"neither", ServiceConfig{Containers: true}, false},
+		{"post only", ServiceConfig{Containers: true, Post: true}, false},
+		{"exec only", ServiceConfig{Containers: true, Exec: true}, false},
+		{"both", ServiceConfig{Containers: true, Exec: true, Post: true}, true},
+		{"allow all without exec", ServiceConfig{Containers: true, AllowAll: true, Post: true}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.service.Allow("containers", http.MethodPost, "exec"); got != tt.want {
+				t.Fatalf("Allow(container exec) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServeUntilShutdownReturnsFatalListenError(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	srv := &http.Server{Addr: "invalid listen address"}
+
+	err := serveUntilShutdown(ctx, stop, srv, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("fatal listen error was reported as a clean shutdown")
+	}
+}
+
+func TestFeaturePermissionMatrix(t *testing.T) {
+	tests := map[string]ServiceConfig{
+		"ping": {Ping: true}, "version": {Version: true}, "info": {Info: true},
+		"events": {Events: true}, "auth": {Auth: true}, "build": {Build: true},
+		"commit": {Commit: true}, "configs": {Configs: true}, "containers": {Containers: true},
+		"distribution": {Distribution: true}, "exec": {Exec: true}, "images": {Images: true},
+		"networks": {Networks: true}, "nodes": {Nodes: true}, "plugins": {Plugins: true},
+		"secrets": {Secrets: true}, "services": {Services: true}, "session": {Session: true},
+		"swarm": {Swarm: true}, "system": {System: true}, "tasks": {Tasks: true},
+		"volumes": {Volumes: true},
+	}
+	if len(tests) != len(featurePermissions) {
+		t.Fatalf("feature matrix has %d cases for %d permissions", len(tests), len(featurePermissions))
+	}
+	for feature, granted := range tests {
+		if (&ServiceConfig{}).Allow(feature, http.MethodGet, "") {
+			t.Errorf("%s allowed without its feature grant", feature)
+		}
+		if !granted.Allow(feature, http.MethodGet, "") {
+			t.Errorf("%s denied with its feature grant", feature)
+		}
+	}
+}
+
+func TestProxyLogsEscapeUntrustedPath(t *testing.T) {
+	var logs bytes.Buffer
+	handler := proxyHandler(&ProxyConfig{ipToRole: map[string]string{}}, nil, nil, log.New(&logs, "", 0))
+	req := httptest.NewRequest(http.MethodGet, "http://proxy/version", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
+	req.URL.Path = "/version\nforged-log-line"
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if got := strings.Count(strings.TrimSpace(logs.String()), "\n"); got != 0 {
+		t.Fatalf("untrusted path created extra log lines: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), `\nforged-log-line`) {
+		t.Fatalf("escaped path missing from log: %q", logs.String())
+	}
+}
+
+func TestExecCacheIsBoundedAndExpires(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	for i := 0; i <= maxExecCacheEntries; i++ {
+		cfg.SetExecContainer(fmt.Sprintf("exec-%d", i), "container")
+	}
+	if len(cfg.execToContainer) != maxExecCacheEntries {
+		t.Fatalf("exec cache size = %d, want %d", len(cfg.execToContainer), maxExecCacheEntries)
+	}
+	cfg.execToContainer["expired"] = dockerExecCacheEntry{ContainerID: "old", ExpiresAt: time.Now().Add(-time.Second)}
+	if _, ok := cfg.GetExecContainer("expired"); ok {
+		t.Fatal("expired exec cache entry was returned")
+	}
+}
+
+func TestResolveExecContainerUsesInspectThenCache(t *testing.T) {
+	var requests []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.URL.Path)
+		body := `{"ContainerID":"container-id"}`
+		if strings.HasPrefix(r.URL.Path, "/containers/") {
+			body = `{"Id":"container-id","Name":"/demo"}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	cfg := &ProxyConfig{
+		containersByRef: make(map[string]dockerContainerMeta),
+		execToContainer: make(map[string]dockerExecCacheEntry),
+	}
+	meta, err := resolveExecContainer(context.Background(), cfg, client, "exec-id")
+	if err != nil || meta.Name != "demo" {
+		t.Fatalf("first resolve = %#v, %v", meta, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("first resolve made %d requests, want 2", len(requests))
+	}
+	if _, err := resolveExecContainer(context.Background(), cfg, client, "exec-id"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("cached resolve made an extra request: %v", requests)
+	}
+}
+
+func TestResolveExecContainerRejectsMissingContainerID(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	cfg := &ProxyConfig{containersByRef: make(map[string]dockerContainerMeta), execToContainer: make(map[string]dockerExecCacheEntry)}
+	if _, err := resolveExecContainer(context.Background(), cfg, client, "exec-id"); err == nil {
+		t.Fatal("exec inspect without ContainerID was accepted")
+	}
+}
+
+func TestResolveContainerCachesNotFoundResponses(t *testing.T) {
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	})}
+	cfg := &ProxyConfig{containersByRef: make(map[string]dockerContainerMeta), missingContainers: make(map[string]time.Time)}
+
+	for i := 0; i < 2; i++ {
+		if _, err := resolveContainer(context.Background(), cfg, client, "missing"); err == nil {
+			t.Fatal("missing container was resolved")
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("Docker received %d missing-container inspections, want 1", requests)
+	}
+}
+
+func TestMissingContainerCacheIsBounded(t *testing.T) {
+	cfg := &ProxyConfig{missingContainers: make(map[string]time.Time)}
+	for i := 0; i <= maxMissingContainerEntries; i++ {
+		cfg.MarkContainerMissing(fmt.Sprintf("missing-%d", i))
+	}
+	if got := len(cfg.missingContainers); got != maxMissingContainerEntries {
+		t.Fatalf("missing-container cache size = %d, want %d", got, maxMissingContainerEntries)
+	}
+}
+
+func TestEventDebouncerModes(t *testing.T) {
+	t.Run("zero delay", func(t *testing.T) {
+		calls := 0
+		d := newEventDebouncer(0, func() { calls++ })
+		d.trigger()
+		d.trigger()
+		if calls != 2 {
+			t.Fatalf("calls = %d, want 2", calls)
+		}
+	})
+
+	t.Run("first event immediate", func(t *testing.T) {
+		called := make(chan struct{}, 1)
+		d := newEventDebouncer(20*time.Millisecond, func() { called <- struct{}{} })
+		defer d.stop()
+		d.trigger()
+		select {
+		case <-called:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("first event was not immediate")
+		}
+	})
+
+	t.Run("burst coalesced", func(t *testing.T) {
+		called := make(chan struct{}, 3)
+		d := newEventDebouncer(20*time.Millisecond, func() { called <- struct{}{} })
+		defer d.stop()
+		d.trigger()
+		<-called
+		d.trigger()
+		d.trigger()
+		select {
+		case <-called:
+		case <-time.After(150 * time.Millisecond):
+			t.Fatal("burst callback did not run")
+		}
+		select {
+		case <-called:
+			t.Fatal("burst generated more than one delayed callback")
+		case <-time.After(40 * time.Millisecond):
+		}
+	})
+}
+
+func TestScopeResponseFilterRejectsCompressedBodies(t *testing.T) {
+	ctx := context.WithValue(context.Background(), responseFilterContextKey{}, &responseFilterContext{
+		service: &ServiceConfig{}, kind: filterContainerList,
+	})
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+		Body:       io.NopCloser(strings.NewReader("compressed")),
+		Request:    httptest.NewRequest(http.MethodGet, "http://proxy/containers/json", nil).WithContext(ctx),
+	}
+	if err := scopeResponseFilter(&ProxyConfig{})(resp); err == nil {
+		t.Fatal("compressed scoped response was accepted")
+	}
+}
+
 func TestRewriteAPIVersion(t *testing.T) {
 	tests := map[string]string{
 		"/containers/json":       "/v1.51/containers/json",
@@ -122,6 +466,65 @@ func TestRewriteAPIVersion(t *testing.T) {
 		if got := rewriteAPIVersion(input, "1.51"); got != want {
 			t.Errorf("rewriteAPIVersion(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestTrimAPIVersionBoundaries(t *testing.T) {
+	tests := map[string]string{
+		"/v1.51":                         "/v1.51",
+		"/version":                       "/version",
+		"/versionfoo":                    "/versionfoo",
+		"/engine/api/v1.51/containers/x": "/containers/x",
+	}
+	for input, want := range tests {
+		if got := pathWithoutAPIVersion(input); got != want {
+			t.Errorf("pathWithoutAPIVersion(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestProxyHandlerDenialsHealthAndAPIRewrite(t *testing.T) {
+	upstreamPaths := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPaths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	cfg := &ProxyConfig{
+		ipToRole: map[string]string{"192.0.2.20": "missing", "192.0.2.30": "client"},
+		services: map[string]*ServiceConfig{"client": {Version: true, APIRewrite: "1.51"}},
+	}
+	handler := proxyHandler(cfg, nil, proxy, log.New(io.Discard, "", 0))
+
+	request := func(remote, path string) int {
+		req := httptest.NewRequest(http.MethodGet, "http://proxy"+path, nil)
+		req.RemoteAddr = remote
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if got := request("192.0.2.10:1", "/version"); got != http.StatusForbidden {
+		t.Fatalf("unknown IP status = %d", got)
+	}
+	if got := request("192.0.2.20:1", "/version"); got != http.StatusForbidden {
+		t.Fatalf("missing profile status = %d", got)
+	}
+	if got := request("127.0.0.1:1", "/version"); got != http.StatusOK {
+		t.Fatalf("local health status = %d", got)
+	}
+	if got := <-upstreamPaths; got != "/version" {
+		t.Fatalf("health path = %q", got)
+	}
+	if got := request("192.0.2.30:1", "/version"); got != http.StatusOK {
+		t.Fatalf("authorized status = %d", got)
+	}
+	if got := <-upstreamPaths; got != "/v1.51/version" {
+		t.Fatalf("rewritten path = %q", got)
 	}
 }
 
@@ -157,9 +560,45 @@ func TestParseProfilesYAMLRejectsInvalidContainerRule(t *testing.T) {
 }
 
 func TestParseProfilesYAMLRejectsUnknownKey(t *testing.T) {
-	_, err := parseProfilesYAML("manager:\n  containers: true\n  allowd_containers: []\n")
-	if err == nil {
-		t.Fatal("unknown profile key was accepted")
+	for _, tt := range []struct {
+		name       string
+		yaml       string
+		want       string
+		mustNotSay string
+	}{
+		{"unknown list", "manager:\n  allowd_containers: []\n", `unknown profile option "allowd_containers"`, "must be a scalar"},
+		{"unknown scalar", "manager:\n  allowd_containers: true\n", `unknown profile option "allowd_containers"`, "must be a scalar"},
+		{"list option with scalar", "manager:\n  allowed_containers: \"a,b\"\n", "allowed_containers must be a YAML list", "unknown profile option"},
+		{"scalar option with list", "manager:\n  containers: []\n", "containers must be a scalar", "unknown profile option"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseProfilesYAML(tt.yaml)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), tt.mustNotSay) {
+				t.Fatalf("error = %v, want %q and not %q", err, tt.want, tt.mustNotSay)
+			}
+		})
+	}
+}
+
+func TestParseProfilesYAMLRejectsCLISingularAliases(t *testing.T) {
+	for key, plural := range map[string]string{
+		"allowed_container": "allowed_containers",
+		"blocked_container": "blocked_containers",
+		"container_rule":    "container_rules",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := parseProfilesYAML("manager:\n  " + key + ": \"a:readonly\"\n")
+			if err == nil || !strings.Contains(err.Error(), `unknown profile option "`+key+`"`) || !strings.Contains(err.Error(), `use "`+plural+`" in YAML`) {
+				t.Fatalf("unexpected alias error: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseProfilesYAMLRejectsNormalizedRoleCollision(t *testing.T) {
+	_, err := parseProfilesYAML("home:\n  ping: true\nproxy-home:\n  version: true\n")
+	if err == nil || !strings.Contains(err.Error(), "normalize to the same role") {
+		t.Fatalf("normalized role collision was not rejected: %v", err)
 	}
 }
 
@@ -215,7 +654,7 @@ func TestEnforceContainerScopeUsesCachedCanonicalID(t *testing.T) {
 			ID:    meta.ID,
 			Names: []string{"/traefik"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "allowlist",
@@ -240,7 +679,7 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 			ID:    "0123456789abcdef",
 			Names: []string{"/docker-socket-proxy"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "blacklist",
@@ -258,13 +697,63 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 	}
 }
 
+func TestScopedProfilesRejectGlobalResourceWrites(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	service := &ServiceConfig{ContainerScope: "allowlist", AllowedContainers: map[string]struct{}{"traefik": {}}}
+	for _, tc := range []struct {
+		feature string
+		method  string
+		path    string
+	}{
+		{"images", http.MethodDelete, "/images/alpine"},
+		{"volumes", http.MethodPost, "/volumes/prune"},
+		{"networks", http.MethodDelete, "/networks/internal"},
+	} {
+		req := httptest.NewRequest(tc.method, "http://proxy"+tc.path, nil)
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, tc.feature, req); err == nil {
+			t.Errorf("scoped %s request %s %s was allowed", tc.feature, tc.method, tc.path)
+		}
+	}
+}
+
+func TestScopedNetworkAndCommitTargets(t *testing.T) {
+	cfg := &ProxyConfig{
+		containersByRef: buildContainerIndex([]dockerContainerSummary{{ID: "allowed-id", Names: []string{"/allowed"}}, {ID: "blocked-id", Names: []string{"/blocked"}}}),
+		execToContainer: make(map[string]dockerExecCacheEntry),
+	}
+	service := &ServiceConfig{ContainerScope: "allowlist", AllowedContainers: map[string]struct{}{"allowed": {}}}
+
+	for _, name := range []string{"allowed", "blocked"} {
+		body := strings.NewReader(fmt.Sprintf(`{"Container":%q}`, name))
+		req := httptest.NewRequest(http.MethodPost, "http://proxy/networks/internal/connect", body)
+		_, err := enforceContainerScope(context.Background(), cfg, nil, service, "networks", req)
+		if name == "allowed" && err != nil {
+			t.Fatalf("allowed network target denied: %v", err)
+		}
+		if name == "blocked" && err == nil {
+			t.Fatal("blocked network target allowed")
+		}
+	}
+
+	for _, name := range []string{"allowed", "blocked"} {
+		req := httptest.NewRequest(http.MethodPost, "http://proxy/commit?container="+name, nil)
+		_, err := enforceContainerScope(context.Background(), cfg, nil, service, "commit", req)
+		if name == "allowed" && err != nil {
+			t.Fatalf("allowed commit target denied: %v", err)
+		}
+		if name == "blocked" && err == nil {
+			t.Fatal("blocked commit target allowed")
+		}
+	}
+}
+
 func TestEnforceContainerScopeAllowsOnlySafeReadOnlyRoutes(t *testing.T) {
 	cfg := &ProxyConfig{
 		containersByRef: buildContainerIndex([]dockerContainerSummary{{
 			ID:    "0123456789abcdef",
 			Names: []string{"/dockman"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "all",
@@ -313,7 +802,7 @@ func TestFilterContainerListResponse(t *testing.T) {
   {"Id":"b","Names":["/docker-socket-proxy"]}
 ]`)),
 	}
-	filterContainerListResponse(resp, nil, service)
+	filterContainerListResponse(resp, service)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +830,7 @@ func TestFilterContainerListKeepsReadOnlyContainer(t *testing.T) {
   {"Id":"b","Names":["/docker-socket-proxy"]}
 ]`)),
 	}
-	filterContainerListResponse(resp, nil, service)
+	filterContainerListResponse(resp, service)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -380,4 +869,52 @@ func TestFilterEventsPreservesDockerEventFields(t *testing.T) {
 	if !strings.Contains(got, `"timeNano":123456789000`) || !strings.Contains(got, `"FutureDockerField":"preserved"`) || strings.Contains(got, "docker-socket-proxy") {
 		t.Fatalf("unexpected filtered events: %s", got)
 	}
+}
+
+func TestFilterEventsUsesEventMetadataForUncachedContainers(t *testing.T) {
+	service := &ServiceConfig{
+		ContainerScope:    "blacklist",
+		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
+	}
+	for _, tc := range []struct {
+		name   string
+		action string
+		want   bool
+	}{
+		{name: "whoami", action: "create", want: true},
+		{name: "whoami", action: "destroy", want: true},
+		{name: "docker-socket-proxy", action: "create", want: false},
+	} {
+		t.Run(tc.action+"/"+tc.name, func(t *testing.T) {
+			cfg := &ProxyConfig{containersByRef: map[string]dockerContainerMeta{}}
+			body := `{"Type":"container","Action":"` + tc.action + `","Actor":{"ID":"new-id","Attributes":{"name":"` + tc.name + `","scope-label":"kept"}}}` + "\n"
+			resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+			filterEventsResponse(resp, cfg, service)
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(got) > 0) != tc.want {
+				t.Fatalf("event forwarded = %v, want %v; body=%s", len(got) > 0, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFilterEventsClosesDockerBodyWhenClientDisconnects(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &blockingReadCloser{closed: make(chan struct{})}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://proxy/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: req}
+	filterEventsResponse(resp, &ProxyConfig{}, &ServiceConfig{ContainerScope: "blacklist"})
+	cancel()
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Docker event body remained open after client cancellation")
+	}
+	_ = resp.Body.Close()
 }

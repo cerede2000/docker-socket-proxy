@@ -19,6 +19,14 @@ Docker Hub is the primary registry; GitHub Container Registry is also available.
 
 `latest` follows `main`. A Git release `vX.Y.Z` additionally publishes immutable `X.Y.Z` and `X.Y` tags to both registries.
 
+The `integration` branch publishes only the mutable `integration` tag. It never replaces `latest` or a release tag.
+
+## Upgrade notes
+
+Release `1.2.0` tightens several permissions and may require profile changes. Container inspection needs `allow_inspect: true`; creating exec sessions needs both `exec: true` and `post: true`; and scoped profiles cannot perform global image, volume, or network writes. Unknown CLI profile options are rejected so that a typo cannot silently produce an unintended policy.
+
+Review the complete migration checklist in [CHANGELOG.md](CHANGELOG.md) before moving an existing deployment from `1.1.2` or an older image, then pin the immutable `1.2.0` tag rather than `latest`.
+
 The published image is continuously analysed by [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). The live report is linked rather than hard-coded here, so its result always reflects current image and vulnerability data.
 
 ## Why this proxy is different
@@ -37,10 +45,12 @@ This lets an operator such as Portainer retain broad access where it is genuinel
 - The proxy only keeps client IP addresses shared with its own Docker networks.
 - Container lists, events, and targeted operations obey the same target scope.
 - The internal name / ID cache avoids an additional Docker request for usual authorization checks.
+- The local `/version` health check is accepted without a profile only from the loopback interface. Do not use host networking or publish port `2375`.
+- For scoped profiles, non-container Docker events are intentionally omitted because they cannot be tied safely to an authorized container.
 
 ## Quick start
 
-Create `profiles.yml`, then start the proxy. The Docker socket is mounted read-only: Docker API requests still work over the Unix socket, but the socket file cannot be replaced from inside the container.
+Create `profiles.yml`, then start the proxy. The `:ro` socket mount only prevents replacement of the Unix socket file; it does **not** make Docker API calls read-only. The proxy policy is the security boundary.
 
 ```yaml
 services:
@@ -141,6 +151,7 @@ traefik:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   networks: true
   events: true
   session: true
@@ -149,6 +160,7 @@ traefik-manager:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -201,7 +213,7 @@ Every API family is disabled by default. YAML booleans (`true` / `false`) are re
 | `build` | `/build` |
 | `commit` | `/commit` |
 | `configs` | `/configs` |
-| `containers` | `/containers` |
+| `containers` | `/containers` (general family; sensitive sub-routes remain separately gated) |
 | `distribution` | `/distribution` |
 | `exec` | `/exec` |
 | `images` | `/images` |
@@ -216,13 +228,64 @@ Every API family is disabled by default. YAML booleans (`true` / `false`) are re
 | `tasks` | `/tasks` |
 | `volumes` | `/volumes` |
 
-Write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even if a family is enabled, unless `post: true` is set. Container operations also require the matching explicit option: `allow_start`, `allow_stop`, and/or `allow_restart`. `allow_restarts` is accepted as an alias for `allow_restart`.
+Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even if a family is enabled, unless `post: true` is set. Narrow container lifecycle permissions are independent from that broad switch and can be granted while `post: false`.
+
+| Container option | Route | Requires `post` |
+| --- | --- | --- |
+| `allow_archive` | `/containers/{id}/archive` | GET/HEAD: no; PUT: yes |
+| `allow_changes` | `/containers/{id}/changes` | no |
+| `allow_export` | `/containers/{id}/export` | no |
+| `allow_inspect` | `/containers/{id}/json` | no |
+| `allow_logs` | `/containers/{id}/logs` | no |
+| `allow_top` | `/containers/{id}/top` | no |
+| `allow_start` | `/containers/{id}/start` | no |
+| `allow_stop` | `/containers/{id}/stop` | no |
+| `allow_restart` | `/containers/{id}/restart` | no |
+| `allow_pause` | `/containers/{id}/pause` | no |
+| `allow_unpause` | `/containers/{id}/unpause` | no |
+| `allow_kill` | `/containers/{id}/kill` | no |
+
+All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required.
+
+Creating an exec session with `POST /containers/{id}/exec` requires all three explicit grants: `containers: true`, `exec: true`, and `post: true`. `allow_all` never enables `exec`.
+
+`GET /containers/{id}/stats` deliberately remains part of the general `containers` read permission. It exposes runtime telemetry, follows the configured container scope, and has no independent `allow_stats` switch.
+
+`allow_all: true` is a grouped but scoped convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `exec`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`. Treat it as a high-impact permission: `export` can read the complete container filesystem and archive reads can disclose arbitrary files inside the selected container.
+
+Minimal lifecycle-only example:
+
+```yaml
+container-operator:
+  ping: true
+  version: true
+  containers: true
+  post: false
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+```
+
+Complete targeted container controls, without enabling unrelated Docker API families:
+
+```yaml
+container-manager:
+  containers: true
+  post: true
+  allow_all: true
+```
 
 `apirewrite` forces a Docker API version for a profile, for example `apirewrite: "1.53"`.
 
 ## Container scope
 
 Names are Docker container names without the `/` prefix. Scope rules apply to lists, events, inspect, logs, stats, exec, network operations, and targeted actions.
+
+### Scope limits
+
+Container scope applies only where a Docker request can be tied to a container. For a scoped profile, global container operations (`create`, `prune`) and destructive image, volume, or non-targeted network writes are denied. Read access to the `images`, `volumes`, and global `networks` families is not filtered per container. Avoid granting these families together with `post: true` unless the client genuinely administers the whole host.
 
 ### Broad access: `all`
 
@@ -233,6 +296,7 @@ portainer:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   images: true
   networks: true
   post: true
@@ -252,6 +316,7 @@ Containers absent from `allowed_containers` are hidden and inaccessible.
 ```yaml
 traefik-manager:
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -266,6 +331,7 @@ Containers in `blocked_containers` are hidden and every operation targeting them
 dockhand:
   ping: true
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -282,6 +348,7 @@ dockhand:
 ```yaml
 dockhand:
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -325,3 +392,7 @@ The proxy logs profile discovery and denials. A client with no role, an unknown 
 go test -race ./...
 go vet ./...
 ```
+
+## License
+
+Licensed under the [MIT License](LICENSE).

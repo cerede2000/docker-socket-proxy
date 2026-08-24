@@ -28,7 +28,11 @@ func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	logger.Printf("[main] starting docker-socket-proxy version=%s git=%s", version, gitSha)
 
-	cfg := parseConfig(os.Args[1:], logger)
+	cfg, err := parseConfig(os.Args[1:], logger)
+	if err != nil {
+		logger.Printf("[main] invalid configuration: %v", err)
+		os.Exit(2)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -60,7 +64,12 @@ func main() {
 		if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
 			logger.Printf("[discover] initial discovery attempt %d/%d failed: %v", i+1, maxRetries, err)
 			if i < maxRetries-1 {
-				time.Sleep(retryDelay)
+				select {
+				case <-ctx.Done():
+					logger.Printf("[main] startup cancelled during initial discovery")
+					return
+				case <-time.After(retryDelay):
+				}
 				retryDelay = retryDelay * 2 // Backoff
 			}
 		} else {
@@ -105,16 +114,34 @@ func main() {
 	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
 		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
+	if err := serveUntilShutdown(ctx, stop, srv, logger); err != nil {
+		logger.Printf("[main] fatal server error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func serveUntilShutdown(ctx context.Context, stop context.CancelFunc, srv *http.Server, logger *log.Logger) error {
+	serverErrors := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("http server error: %v", err)
+			serverErrors <- err
 		}
 	}()
 
-	<-ctx.Done()
+	var serverErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrors:
+		logger.Printf("[main] http server error: %v", err)
+		serverErr = err
+		stop()
+	}
 	logger.Printf("[main] shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil && serverErr == nil {
+		return err
+	}
+	return serverErr
 }
