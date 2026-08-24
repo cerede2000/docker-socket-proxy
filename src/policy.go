@@ -418,6 +418,10 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 	if !service.HasContainerScope() {
 		return nil, nil
 	}
+	isWrite := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
+	if isWrite && (feature == "images" || feature == "volumes") {
+		return nil, fmt.Errorf("global %s write is denied for scoped profiles", feature)
+	}
 
 	switch feature {
 	case "containers":
@@ -469,6 +473,8 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 			if err := requireWritableContainer(access, meta); err != nil {
 				return nil, err
 			}
+		} else if isWrite {
+			return nil, fmt.Errorf("global network write is denied for scoped profiles")
 		}
 	case "commit":
 		if ref := r.URL.Query().Get("container"); ref != "" {

@@ -466,6 +466,25 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 	}
 }
 
+func TestScopedProfilesRejectGlobalResourceWrites(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	service := &ServiceConfig{ContainerScope: "allowlist", AllowedContainers: map[string]struct{}{"traefik": {}}}
+	for _, tc := range []struct {
+		feature string
+		method  string
+		path    string
+	}{
+		{"images", http.MethodDelete, "/images/alpine"},
+		{"volumes", http.MethodPost, "/volumes/prune"},
+		{"networks", http.MethodDelete, "/networks/internal"},
+	} {
+		req := httptest.NewRequest(tc.method, "http://proxy"+tc.path, nil)
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, tc.feature, req); err == nil {
+			t.Errorf("scoped %s request %s %s was allowed", tc.feature, tc.method, tc.path)
+		}
+	}
+}
+
 func TestEnforceContainerScopeAllowsOnlySafeReadOnlyRoutes(t *testing.T) {
 	cfg := &ProxyConfig{
 		containersByRef: buildContainerIndex([]dockerContainerSummary{{

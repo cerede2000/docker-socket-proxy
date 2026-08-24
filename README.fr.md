@@ -39,10 +39,12 @@ Un outil peut donc disposer d'un accès Docker étendu lorsque c'est nécessaire
 - Le proxy ne retient que les IP partagées avec ses propres réseaux Docker.
 - Les listes, les événements et les opérations ciblant un conteneur respectent la même portée.
 - Le cache interne nom / ID de conteneur évite une requête Docker supplémentaire pour les vérifications usuelles.
+- Le contrôle local `/version` est accepté sans profil uniquement depuis l'interface loopback. N'utilisez pas le réseau hôte et ne publiez pas le port `2375`.
+- Pour les profils à portée limitée, les événements Docker non liés à un conteneur sont volontairement omis car ils ne peuvent pas être rattachés sûrement à une cible autorisée.
 
 ## Démarrage rapide
 
-Créez un fichier `profiles.yml`, puis lancez le proxy. Le montage du socket est en lecture seule : les requêtes Docker restent possibles via l'API Unix, mais le fichier socket ne peut pas être remplacé depuis le conteneur.
+Créez un fichier `profiles.yml`, puis lancez le proxy. Le montage `:ro` empêche seulement de remplacer le fichier socket Unix ; il ne rend **pas** les appels à l'API Docker accessibles en lecture seule. La politique du proxy constitue la barrière de sécurité.
 
 ```yaml
 services:
@@ -144,6 +146,7 @@ traefik:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   networks: true
   events: true
   session: true
@@ -152,6 +155,7 @@ traefik-manager:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -240,7 +244,7 @@ Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias d
 
 La création d'une session exec via `POST /containers/{id}/exec` exige les trois droits explicites `containers: true`, `exec: true` et `post: true`. `allow_all` n'active jamais `exec`.
 
-`allow_all: true` est un raccourci pour toutes les options `allow_*` du tableau. Ce n'est volontairement **pas** un droit Docker global : il n'active ni `containers`, ni `post`, ni une autre famille d'API et ne contourne pas les portées de conteneurs. L'envoi d'une archive et les autres écritures génériques nécessitent donc toujours `post: true`.
+`allow_all: true` est un raccourci groupé mais limité à la portée pour toutes les options `allow_*` du tableau. Ce n'est volontairement **pas** un droit Docker global : il n'active ni `containers`, ni `exec`, ni `post`, ni une autre famille d'API et ne contourne pas les portées de conteneurs. L'envoi d'une archive et les autres écritures génériques nécessitent donc toujours `post: true`. Traitez-le comme un droit à fort impact : `export` peut lire tout le système de fichiers du conteneur et la lecture d'archive peut exposer n'importe quel fichier de la cible.
 
 Exemple minimal limité au cycle de vie :
 
@@ -272,6 +276,10 @@ container-manager:
 
 Les noms sont les noms Docker sans le préfixe `/`. Les règles s'appliquent aux listes, événements, inspections, logs, statistiques, exec, opérations réseau et actions ciblées.
 
+### Limites de la portée
+
+La portée conteneur s'applique uniquement lorsqu'une requête Docker peut être rattachée à un conteneur. Pour un profil limité, les opérations globales sur les conteneurs (`create`, `prune`) et les écritures destructrices sur les images, volumes ou réseaux non ciblés sont refusées. Les lectures des familles globales `images`, `volumes` et `networks` ne sont pas filtrées par conteneur. Évitez d'accorder ces familles avec `post: true` sauf si le client administre réellement tout l'hôte.
+
 ### Accès large : `all`
 
 `all` est la valeur par défaut. Le profil conserve ses droits sur tous les conteneurs ; utilisez une règle `deny` pour retirer une cible critique.
@@ -281,6 +289,7 @@ portainer:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   images: true
   networks: true
   post: true
@@ -300,6 +309,7 @@ Les conteneurs absents de `allowed_containers` sont invisibles et inaccessibles.
 ```yaml
 traefik-manager:
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -315,6 +325,7 @@ Les conteneurs de `blocked_containers` sont invisibles et toute opération les v
 dockhand:
   ping: true
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -332,6 +343,7 @@ dockhand:
 ```yaml
 dockhand:
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -376,3 +388,7 @@ La runtime `distroless/static-debian13:nonroot` est adaptée à ce modèle : le 
 go test -race ./...
 go vet ./...
 ```
+
+## Licence
+
+Distribué sous [licence MIT](LICENSE).
