@@ -633,6 +633,37 @@ func TestScopedProfilesRejectGlobalResourceWrites(t *testing.T) {
 	}
 }
 
+func TestScopedNetworkAndCommitTargets(t *testing.T) {
+	cfg := &ProxyConfig{
+		containersByRef: buildContainerIndex([]dockerContainerSummary{{ID: "allowed-id", Names: []string{"/allowed"}}, {ID: "blocked-id", Names: []string{"/blocked"}}}),
+		execToContainer: make(map[string]dockerExecCacheEntry),
+	}
+	service := &ServiceConfig{ContainerScope: "allowlist", AllowedContainers: map[string]struct{}{"allowed": {}}}
+
+	for _, name := range []string{"allowed", "blocked"} {
+		body := strings.NewReader(fmt.Sprintf(`{"Container":%q}`, name))
+		req := httptest.NewRequest(http.MethodPost, "http://proxy/networks/internal/connect", body)
+		_, err := enforceContainerScope(context.Background(), cfg, nil, service, "networks", req)
+		if name == "allowed" && err != nil {
+			t.Fatalf("allowed network target denied: %v", err)
+		}
+		if name == "blocked" && err == nil {
+			t.Fatal("blocked network target allowed")
+		}
+	}
+
+	for _, name := range []string{"allowed", "blocked"} {
+		req := httptest.NewRequest(http.MethodPost, "http://proxy/commit?container="+name, nil)
+		_, err := enforceContainerScope(context.Background(), cfg, nil, service, "commit", req)
+		if name == "allowed" && err != nil {
+			t.Fatalf("allowed commit target denied: %v", err)
+		}
+		if name == "blocked" && err == nil {
+			t.Fatal("blocked commit target allowed")
+		}
+	}
+}
+
 func TestEnforceContainerScopeAllowsOnlySafeReadOnlyRoutes(t *testing.T) {
 	cfg := &ProxyConfig{
 		containersByRef: buildContainerIndex([]dockerContainerSummary{{
