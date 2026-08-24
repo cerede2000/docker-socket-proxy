@@ -21,6 +21,12 @@ La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/
 
 La branche `integration` publie uniquement le tag mutable `integration`. Elle ne remplace jamais `latest` ni un tag de release.
 
+## Notes de mise à niveau
+
+La prochaine release renforce plusieurs permissions et peut nécessiter une adaptation des profils. L'inspection d'un conteneur demande `allow_inspect: true` ; la création d'une session exec demande à la fois `exec: true` et `post: true` ; enfin, les profils à portée limitée ne peuvent plus effectuer d'écritures globales sur les images, volumes ou réseaux. Les options de profil CLI inconnues sont rejetées afin qu'une faute de frappe ne produise pas silencieusement une politique inattendue.
+
+Consultez la procédure de migration complète dans [CHANGELOG.md](CHANGELOG.md) avant de remplacer une image `1.1.2` ou antérieure. Testez d'abord le tag `integration`, puis utilisez le tag immuable de la release lorsqu'il sera publié.
+
 L'image publiée est analysée en continu par [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). Le rapport est lié ici plutôt que figé dans le README : son résultat suit les mises à jour des vulnérabilités et de l'image.
 
 ## Ce qui le différencie
