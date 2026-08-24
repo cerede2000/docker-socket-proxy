@@ -65,12 +65,28 @@ func classifyPath(path string) (feature string, action string) {
 		segs := strings.Split(strings.Trim(p, "/"), "/")
 		if len(segs) >= 3 {
 			switch segs[2] {
+			case "archive":
+				return "containers", "archive"
+			case "changes":
+				return "containers", "changes"
+			case "export":
+				return "containers", "export"
+			case "logs":
+				return "containers", "logs"
+			case "pause":
+				return "containers", "pause"
 			case "start":
 				return "containers", "start"
 			case "stop":
 				return "containers", "stop"
 			case "restart":
 				return "containers", "restart"
+			case "top":
+				return "containers", "top"
+			case "unpause":
+				return "containers", "unpause"
+			case "kill":
+				return "containers", "kill"
 			case "exec":
 				return "containers", "exec"
 			}
@@ -207,26 +223,58 @@ func (s *ServiceConfig) Allow(feature, method, action string) bool {
 		return false
 	}
 
+	// Sensitive container reads require their own explicit permission, even
+	// when the containers family is enabled. This prevents accidental log or
+	// filesystem disclosure from a broad read profile.
+	if feature == "containers" {
+		switch action {
+		case "archive":
+			if !s.AllowArchive {
+				return false
+			}
+		case "changes":
+			if !s.AllowChanges {
+				return false
+			}
+		case "export":
+			if !s.AllowExport {
+				return false
+			}
+		case "logs":
+			if !s.AllowLogs {
+				return false
+			}
+		case "top":
+			if !s.AllowTop {
+				return false
+			}
+		}
+	}
+
 	if !isWrite {
 		return true
 	}
 
-	if !s.Post {
-		return false
-	}
-
+	// Explicit lifecycle permissions are deliberately narrower than post and
+	// remain usable while post=false. Generic writes still require post=true.
 	if feature == "containers" {
 		switch action {
+		case "pause":
+			return s.AllowPause
 		case "start":
 			return s.AllowStart
 		case "stop":
 			return s.AllowStop
 		case "restart":
 			return s.AllowRestart
+		case "unpause":
+			return s.AllowUnpause
+		case "kill":
+			return s.AllowKill
 		}
 	}
 
-	return true
+	return s.Post
 }
 
 // -----------------------------

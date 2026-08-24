@@ -113,12 +113,28 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 		s.Volumes = b
 	case "post":
 		s.Post = b
+	case "allow_archive":
+		s.AllowArchive = b
+	case "allow_changes":
+		s.AllowChanges = b
+	case "allow_export":
+		s.AllowExport = b
+	case "allow_logs":
+		s.AllowLogs = b
+	case "allow_pause":
+		s.AllowPause = b
 	case "allow_start":
 		s.AllowStart = b
 	case "allow_stop":
 		s.AllowStop = b
 	case "allow_restart", "allow_restarts":
 		s.AllowRestart = b
+	case "allow_top":
+		s.AllowTop = b
+	case "allow_unpause":
+		s.AllowUnpause = b
+	case "allow_kill":
+		s.AllowKill = b
 	case "apirewrite":
 		// Pour apirewrite, on prend la valeur brute (ex: "1.51")
 		s.APIRewrite = strings.TrimSpace(value)
@@ -420,9 +436,9 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		logger.Printf("[config] WARNING: aucun profil défini (pas de --home / --portainer / etc.)")
 	} else {
 		for name, svc := range cfg.services {
-			logger.Printf("[config] profil=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v scope=%s rules=%d apirewrite=%q",
+			logger.Printf("[config] profile=%s rights: ping=%v version=%v info=%v containers=%v images=%v networks=%v exec=%v post=%v start=%v stop=%v restart=%v pause=%v unpause=%v kill=%v scope=%s rules=%d apirewrite=%q",
 				name, svc.Ping, svc.Version, svc.Info, svc.Containers, svc.Images, svc.Networks,
-				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.ContainerScope, len(svc.ContainerRules), svc.APIRewrite)
+				svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.AllowPause, svc.AllowUnpause, svc.AllowKill, svc.ContainerScope, len(svc.ContainerRules), svc.APIRewrite)
 		}
 	}
 
@@ -438,7 +454,9 @@ var knownProfileKeys = map[string]struct{}{
 	"build": {}, "commit": {}, "configs": {}, "containers": {}, "distribution": {},
 	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
 	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
-	"post": {}, "allow_start": {}, "allow_stop": {}, "allow_restart": {}, "allow_restarts": {},
+	"post": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_logs": {},
+	"allow_pause": {}, "allow_restart": {}, "allow_restarts": {}, "allow_start": {}, "allow_stop": {},
+	"allow_top": {}, "allow_unpause": {}, "allow_kill": {},
 	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},
 }
 
@@ -544,9 +562,9 @@ func loadProfilesFromFile(cfg *ProxyConfig, logger *log.Logger) error {
 
 	logger.Printf("[profiles] loaded %d profiles from %s", len(newServices), cfg.ProfilesFile)
 	for name, svc := range newServices {
-		logger.Printf("[profiles] profil=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v scope=%s allowed=%d blocked=%d rules=%d apirewrite=%q",
+		logger.Printf("[profiles] profile=%s ping=%v version=%v info=%v events=%v containers=%v exec=%v post=%v start=%v stop=%v restart=%v pause=%v unpause=%v kill=%v scope=%s allowed=%d blocked=%d rules=%d apirewrite=%q",
 			name, svc.Ping, svc.Version, svc.Info, svc.Events, svc.Containers,
-			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.ContainerScope, len(svc.AllowedContainers), len(svc.BlockedContainers), len(svc.ContainerRules), svc.APIRewrite)
+			svc.Exec, svc.Post, svc.AllowStart, svc.AllowStop, svc.AllowRestart, svc.AllowPause, svc.AllowUnpause, svc.AllowKill, svc.ContainerScope, len(svc.AllowedContainers), len(svc.BlockedContainers), len(svc.ContainerRules), svc.APIRewrite)
 	}
 
 	return nil
