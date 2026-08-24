@@ -1,7 +1,9 @@
-FROM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
 
 ARG APP_VERSION="dev"
 ARG APP_GIT_SHA="unknown"
+ARG TARGETOS
+ARG TARGETARCH
 
 ENV CGO_ENABLED=0
 
@@ -10,7 +12,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY src/ ./src
 
-RUN go build -trimpath \
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=${APP_VERSION} -X main.gitSha=${APP_GIT_SHA}" \
     -o /out/docker-socket-proxy ./src
 
