@@ -26,10 +26,7 @@ func parseBoolString(s string) bool {
 
 func normalizeRoleName(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
-	if strings.HasPrefix(n, "proxy-") {
-		n = strings.TrimPrefix(n, "proxy-")
-	}
-	return n
+	return strings.TrimPrefix(n, "proxy-")
 }
 
 func ensureService(m map[string]*ServiceConfig, role string) *ServiceConfig {
