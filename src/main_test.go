@@ -59,6 +59,17 @@ func TestParseConfigCLIOverridesEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseConfigWarnsAboutUnknownProfileOption(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := parseConfig([]string{"--traefik.pingg=1"}, log.New(&logs, "", 0))
+	if !strings.Contains(logs.String(), `WARNING profile="traefik" option="pingg"`) {
+		t.Fatalf("unknown option was not reported: %q", logs.String())
+	}
+	if cfg.GetService("traefik") == nil {
+		t.Fatal("deny-by-default profile was not retained")
+	}
+}
+
 func TestDockerClientTimeoutsSeparateStreamingFromDiscovery(t *testing.T) {
 	streaming := newDockerHTTPClient("/tmp/docker.sock")
 	if streaming.Timeout != 0 {
@@ -350,6 +361,13 @@ func TestParseProfilesYAMLRejectsUnknownKey(t *testing.T) {
 	_, err := parseProfilesYAML("manager:\n  containers: true\n  allowd_containers: []\n")
 	if err == nil {
 		t.Fatal("unknown profile key was accepted")
+	}
+}
+
+func TestParseProfilesYAMLRejectsNormalizedRoleCollision(t *testing.T) {
+	_, err := parseProfilesYAML("home:\n  ping: true\nproxy-home:\n  version: true\n")
+	if err == nil || !strings.Contains(err.Error(), "normalize to the same role") {
+		t.Fatalf("normalized role collision was not rejected: %v", err)
 	}
 }
 
