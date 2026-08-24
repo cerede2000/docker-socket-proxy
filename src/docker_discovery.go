@@ -130,7 +130,7 @@ func indexContainerSummary(c dockerContainerSummary) dockerContainerMeta {
 	if len(c.Names) > 0 {
 		name = normalizeContainerRef(c.Names[0])
 	}
-	return dockerContainerMeta{ID: c.ID, Name: name, Labels: c.Labels}
+	return dockerContainerMeta{ID: c.ID, Name: name}
 }
 
 func buildContainerIndex(containers []dockerContainerSummary) map[string]dockerContainerMeta {

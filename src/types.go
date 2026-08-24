@@ -234,15 +234,11 @@ type dockerContainerInspect struct {
 	ID              string                      `json:"Id"`
 	Name            string                      `json:"Name"`
 	NetworkSettings dockerContainerNetworkBlock `json:"NetworkSettings"`
-	Config          struct {
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
 }
 
 type dockerContainerMeta struct {
-	ID     string
-	Name   string
-	Labels map[string]string
+	ID   string
+	Name string
 }
 
 func normalizeContainerRef(ref string) string {

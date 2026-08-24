@@ -248,31 +248,6 @@ type responseFilterContext struct {
 
 type responseFilterContextKey struct{}
 
-func (c *ProxyConfig) containerMetas() []dockerContainerMeta {
-	c.containerMu.RLock()
-	defer c.containerMu.RUnlock()
-	seen := make(map[string]struct{})
-	metas := make([]dockerContainerMeta, 0, len(c.containersByRef)/2)
-	for _, meta := range c.containersByRef {
-		if _, ok := seen[meta.ID]; ok {
-			continue
-		}
-		seen[meta.ID] = struct{}{}
-		metas = append(metas, meta)
-	}
-	return metas
-}
-
-func (c *ProxyConfig) allowedContainerIDs(service *ServiceConfig) []string {
-	ids := make([]string, 0)
-	for _, meta := range c.containerMetas() {
-		if service.AllowsContainer(meta) {
-			ids = append(ids, meta.ID)
-		}
-	}
-	return ids
-}
-
 func resolveContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client, ref string) (dockerContainerMeta, error) {
 	if meta, ok := cfg.GetContainer(ref); ok {
 		return meta, nil
@@ -293,7 +268,7 @@ func resolveContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client
 	if err := json.NewDecoder(resp.Body).Decode(&inspect); err != nil {
 		return dockerContainerMeta{}, err
 	}
-	meta := dockerContainerMeta{ID: inspect.ID, Name: normalizeContainerRef(inspect.Name), Labels: inspect.Config.Labels}
+	meta := dockerContainerMeta{ID: inspect.ID, Name: normalizeContainerRef(inspect.Name)}
 	if meta.ID == "" || meta.Name == "" {
 		return dockerContainerMeta{}, fmt.Errorf("docker inspect container %q returned incomplete metadata", ref)
 	}
@@ -509,7 +484,7 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 	return nil, nil
 }
 
-func filterContainerListResponse(resp *http.Response, cfg *ProxyConfig, service *ServiceConfig) {
+func filterContainerListResponse(resp *http.Response, service *ServiceConfig) {
 	originalBody := resp.Body
 	ctx := context.Background()
 	if resp.Request != nil {
@@ -600,11 +575,7 @@ func filterEventsResponse(resp *http.Response, cfg *ProxyConfig, service *Servic
 			if event.Type != "container" {
 				continue
 			}
-			meta := dockerContainerMeta{
-				ID:     event.Actor.ID,
-				Name:   normalizeContainerRef(event.Actor.Attributes["name"]),
-				Labels: event.Actor.Attributes,
-			}
+			meta := dockerContainerMeta{ID: event.Actor.ID, Name: normalizeContainerRef(event.Actor.Attributes["name"])}
 			if meta.Name == "" {
 				var ok bool
 				meta, ok = cfg.GetContainer(event.Actor.ID)
@@ -636,7 +607,7 @@ func scopeResponseFilter(cfg *ProxyConfig) func(*http.Response) error {
 		}
 		switch filter.kind {
 		case filterContainerList:
-			filterContainerListResponse(resp, cfg, filter.service)
+			filterContainerListResponse(resp, filter.service)
 		case filterEvents:
 			filterEventsResponse(resp, cfg, filter.service)
 		}

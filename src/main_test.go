@@ -521,7 +521,7 @@ func TestFilterContainerListResponse(t *testing.T) {
   {"Id":"b","Names":["/docker-socket-proxy"]}
 ]`)),
 	}
-	filterContainerListResponse(resp, nil, service)
+	filterContainerListResponse(resp, service)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -549,7 +549,7 @@ func TestFilterContainerListKeepsReadOnlyContainer(t *testing.T) {
   {"Id":"b","Names":["/docker-socket-proxy"]}
 ]`)),
 	}
-	filterContainerListResponse(resp, nil, service)
+	filterContainerListResponse(resp, service)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
