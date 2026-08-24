@@ -63,6 +63,14 @@ func TestClassifyPath(t *testing.T) {
 		{"/v1.51/containers/json", "containers", ""},
 		{"/v1.51/containers/id/start", "containers", "start"},
 		{"/v1.51/containers/id/restart", "containers", "restart"},
+		{"/v1.51/containers/id/pause", "containers", "pause"},
+		{"/v1.51/containers/id/unpause", "containers", "unpause"},
+		{"/v1.51/containers/id/kill", "containers", "kill"},
+		{"/v1.51/containers/id/logs", "containers", "logs"},
+		{"/v1.51/containers/id/top", "containers", "top"},
+		{"/v1.51/containers/id/changes", "containers", "changes"},
+		{"/v1.51/containers/id/archive", "containers", "archive"},
+		{"/v1.51/containers/id/export", "containers", "export"},
 		{"/v1.51/exec/id/start", "exec", ""},
 		{"/not-a-docker-endpoint", "unknown", ""},
 	}
@@ -109,6 +117,55 @@ func TestAllowReadAndWritePermissions(t *testing.T) {
 	service.AllowStart = true
 	if !service.Allow("containers", http.MethodPost, "start") {
 		t.Fatal("start was denied with allow_start")
+	}
+}
+
+func TestLifecyclePermissionsDoNotRequireBroadPost(t *testing.T) {
+	service := &ServiceConfig{
+		Containers:   true,
+		AllowStart:   true,
+		AllowStop:    true,
+		AllowRestart: true,
+		AllowPause:   true,
+		AllowUnpause: true,
+		AllowKill:    true,
+	}
+	for _, action := range []string{"start", "stop", "restart", "pause", "unpause", "kill"} {
+		if !service.Allow("containers", http.MethodPost, action) {
+			t.Errorf("explicit lifecycle action %q was denied while post=false", action)
+		}
+	}
+	if service.Allow("containers", http.MethodPost, "rename") {
+		t.Fatal("generic container write was allowed while post=false")
+	}
+}
+
+func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
+	service := &ServiceConfig{Containers: true, Post: true}
+	tests := []struct {
+		action string
+		allow  *bool
+	}{
+		{"archive", &service.AllowArchive},
+		{"changes", &service.AllowChanges},
+		{"export", &service.AllowExport},
+		{"logs", &service.AllowLogs},
+		{"top", &service.AllowTop},
+	}
+	for _, tt := range tests {
+		if service.Allow("containers", http.MethodGet, tt.action) {
+			t.Errorf("sensitive read %q was allowed by containers alone", tt.action)
+		}
+		*tt.allow = true
+		if !service.Allow("containers", http.MethodGet, tt.action) {
+			t.Errorf("sensitive read %q was denied after explicit grant", tt.action)
+		}
+		*tt.allow = false
+	}
+	service.AllowArchive = true
+	service.Post = false
+	if service.Allow("containers", http.MethodPut, "archive") {
+		t.Fatal("archive upload was allowed while post=false")
 	}
 }
 

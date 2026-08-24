@@ -13,6 +13,14 @@ administrator:
   allow_start: true
   allow_stop: true
   allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+  allow_kill: true
+  allow_archive: true
+  allow_changes: true
+  allow_export: true
+  allow_logs: true
+  allow_top: true
   container_scope: all
 
 portainer:
@@ -31,6 +39,14 @@ portainer:
   allow_start: true
   allow_stop: true
   allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+  allow_kill: true
+  allow_archive: true
+  allow_changes: true
+  allow_export: true
+  allow_logs: true
+  allow_top: true
 
 # Exemple de profil restreint : le rôle conserve ses droits Docker, mais ne peut
 # agir que sur le conteneur nommé traefik.
@@ -56,6 +72,10 @@ operator:
   allow_start: true
   allow_stop: true
   allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+  allow_logs: true
+  allow_top: true
   container_scope: blacklist
   blocked_containers:
     - docker-socket-proxy
@@ -89,6 +109,14 @@ dockhand:
   allow_start: true
   allow_stop: true
   allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+  allow_kill: true
+  allow_archive: true
+  allow_changes: true
+  allow_export: true
+  allow_logs: true
+  allow_top: true
   container_scope: blacklist
   blocked_containers:
     - docker-socket-proxy

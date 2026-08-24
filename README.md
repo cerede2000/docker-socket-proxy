@@ -19,6 +19,8 @@ Docker Hub is the primary registry; GitHub Container Registry is also available.
 
 `latest` follows `main`. A Git release `vX.Y.Z` additionally publishes immutable `X.Y.Z` and `X.Y` tags to both registries.
 
+The `integration` branch publishes only the mutable `integration` tag. It never replaces `latest` or a release tag.
+
 The published image is continuously analysed by [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). The live report is linked rather than hard-coded here, so its result always reflects current image and vulnerability data.
 
 ## Why this proxy is different
@@ -201,7 +203,7 @@ Every API family is disabled by default. YAML booleans (`true` / `false`) are re
 | `build` | `/build` |
 | `commit` | `/commit` |
 | `configs` | `/configs` |
-| `containers` | `/containers` |
+| `containers` | `/containers` (general family; sensitive sub-routes remain separately gated) |
 | `distribution` | `/distribution` |
 | `exec` | `/exec` |
 | `images` | `/images` |
@@ -216,7 +218,38 @@ Every API family is disabled by default. YAML booleans (`true` / `false`) are re
 | `tasks` | `/tasks` |
 | `volumes` | `/volumes` |
 
-Write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even if a family is enabled, unless `post: true` is set. Container operations also require the matching explicit option: `allow_start`, `allow_stop`, and/or `allow_restart`. `allow_restarts` is accepted as an alias for `allow_restart`.
+Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even if a family is enabled, unless `post: true` is set. Narrow container lifecycle permissions are independent from that broad switch and can be granted while `post: false`.
+
+| Container option | Route | Requires `post` |
+| --- | --- | --- |
+| `allow_archive` | `/containers/{id}/archive` | GET/HEAD: no; PUT: yes |
+| `allow_changes` | `/containers/{id}/changes` | no |
+| `allow_export` | `/containers/{id}/export` | no |
+| `allow_logs` | `/containers/{id}/logs` | no |
+| `allow_top` | `/containers/{id}/top` | no |
+| `allow_start` | `/containers/{id}/start` | no |
+| `allow_stop` | `/containers/{id}/stop` | no |
+| `allow_restart` | `/containers/{id}/restart` | no |
+| `allow_pause` | `/containers/{id}/pause` | no |
+| `allow_unpause` | `/containers/{id}/unpause` | no |
+| `allow_kill` | `/containers/{id}/kill` | no |
+
+All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required. There is intentionally no global `allow_all`: broad writes require `post`, API families remain explicit, and sensitive container routes keep their own switches.
+
+Minimal lifecycle-only example:
+
+```yaml
+container-operator:
+  ping: true
+  version: true
+  containers: true
+  post: false
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+```
 
 `apirewrite` forces a Docker API version for a profile, for example `apirewrite: "1.53"`.
 

@@ -33,9 +33,17 @@ type ServiceConfig struct {
 	Volumes      bool
 
 	Post         bool
+	AllowArchive bool
+	AllowChanges bool
+	AllowExport  bool
+	AllowLogs    bool
+	AllowPause   bool
+	AllowRestart bool
 	AllowStart   bool
 	AllowStop    bool
-	AllowRestart bool
+	AllowTop     bool
+	AllowUnpause bool
+	AllowKill    bool
 
 	APIRewrite string // Version d'API à forcer (ex: "1.51")
 

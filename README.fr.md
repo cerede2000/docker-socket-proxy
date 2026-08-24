@@ -19,6 +19,8 @@ La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/
 
 `latest` suit `main`. Chaque release Git `vX.Y.Z` publie également les tags Docker immuables `X.Y.Z` et `X.Y` sur les deux registres.
 
+La branche `integration` publie uniquement le tag mutable `integration`. Elle ne remplace jamais `latest` ni un tag de release.
+
 L'image publiée est analysée en continu par [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). Le rapport est lié ici plutôt que figé dans le README : son résultat suit les mises à jour des vulnérabilités et de l'image.
 
 ## Ce qui le différencie
@@ -202,7 +204,7 @@ Chaque famille est désactivée par défaut. Une valeur YAML booléenne (`true`/
 | `build` | `/build` |
 | `commit` | `/commit` |
 | `configs` | `/configs` |
-| `containers` | `/containers` |
+| `containers` | `/containers` (famille générale ; les sous-routes sensibles restent contrôlées séparément) |
 | `distribution` | `/distribution` |
 | `exec` | `/exec` |
 | `images` | `/images` |
@@ -217,7 +219,38 @@ Chaque famille est désactivée par défaut. Une valeur YAML booléenne (`true`/
 | `tasks` | `/tasks` |
 | `volumes` | `/volumes` |
 
-Les écritures (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdites même lorsqu'une famille est activée, sauf si `post: true` est ajouté. Pour les opérations de conteneur, `post` doit être complété explicitement par `allow_start`, `allow_stop` et/ou `allow_restart` selon le besoin. `allow_restarts` est accepté comme alias de `allow_restart`.
+Les écritures génériques (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdites même lorsqu'une famille est activée, sauf si `post: true` est ajouté. Les actions ciblées de cycle de vie sont indépendantes de ce droit large et peuvent être accordées avec `post: false`.
+
+| Option conteneur | Route | Nécessite `post` |
+| --- | --- | --- |
+| `allow_archive` | `/containers/{id}/archive` | GET/HEAD : non ; PUT : oui |
+| `allow_changes` | `/containers/{id}/changes` | non |
+| `allow_export` | `/containers/{id}/export` | non |
+| `allow_logs` | `/containers/{id}/logs` | non |
+| `allow_top` | `/containers/{id}/top` | non |
+| `allow_start` | `/containers/{id}/start` | non |
+| `allow_stop` | `/containers/{id}/stop` | non |
+| `allow_restart` | `/containers/{id}/restart` | non |
+| `allow_pause` | `/containers/{id}/pause` | non |
+| `allow_unpause` | `/containers/{id}/unpause` | non |
+| `allow_kill` | `/containers/{id}/kill` | non |
+
+Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias de `allow_restart` ; contrairement au commutateur groupé de LinuxServer, il n'accorde pas implicitement `stop` ou `kill`. Ces droits doivent être explicitement ajoutés. Il n'existe volontairement aucun `allow_all` global : `post` contrôle les écritures larges, les familles d'API restent explicites et les routes sensibles conservent leurs propres droits.
+
+Exemple minimal limité au cycle de vie :
+
+```yaml
+container-operator:
+  ping: true
+  version: true
+  containers: true
+  post: false
+  allow_start: true
+  allow_stop: true
+  allow_restart: true
+  allow_pause: true
+  allow_unpause: true
+```
 
 `apirewrite` force une version d'API Docker pour un profil, par exemple `apirewrite: "1.53"`.
 
