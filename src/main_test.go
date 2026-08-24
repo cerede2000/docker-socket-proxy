@@ -181,7 +181,7 @@ func TestLifecyclePermissionsDoNotRequireBroadPost(t *testing.T) {
 	}
 }
 
-func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
+func TestSensitiveContainerRoutesAreExplicitlyGated(t *testing.T) {
 	service := &ServiceConfig{Containers: true, Post: true}
 	tests := []struct {
 		action string
@@ -204,10 +204,24 @@ func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
 		}
 		*tt.allow = false
 	}
-	service.AllowArchive = true
-	service.Post = false
-	if service.Allow("containers", http.MethodPut, "archive") {
-		t.Fatal("archive upload was allowed while post=false")
+
+	for _, tt := range []struct {
+		name    string
+		service ServiceConfig
+		want    bool
+	}{
+		{"neither permission", ServiceConfig{Containers: true}, false},
+		{"post only", ServiceConfig{Containers: true, Post: true}, false},
+		{"archive only", ServiceConfig{Containers: true, AllowArchive: true}, false},
+		{"archive and post", ServiceConfig{Containers: true, AllowArchive: true, Post: true}, true},
+		{"allow_all only", ServiceConfig{Containers: true, AllowAll: true}, false},
+		{"allow_all and post", ServiceConfig{Containers: true, AllowAll: true, Post: true}, true},
+	} {
+		t.Run("archive upload "+tt.name, func(t *testing.T) {
+			if got := tt.service.Allow("containers", http.MethodPut, "archive"); got != tt.want {
+				t.Fatalf("archive upload permission = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

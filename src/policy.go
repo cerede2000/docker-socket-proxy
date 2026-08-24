@@ -184,6 +184,7 @@ var containerReadPermissions = map[string]func(*ServiceConfig) bool{
 }
 
 var containerWritePermissions = map[string]func(*ServiceConfig) bool{
+	"archive": func(s *ServiceConfig) bool { return s.Post && (s.AllowAll || s.AllowArchive) },
 	"pause":   func(s *ServiceConfig) bool { return s.AllowAll || s.AllowPause },
 	"start":   func(s *ServiceConfig) bool { return s.AllowAll || s.AllowStart },
 	"stop":    func(s *ServiceConfig) bool { return s.AllowAll || s.AllowStop },
