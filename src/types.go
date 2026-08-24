@@ -86,9 +86,10 @@ type ProxyConfig struct {
 	selfNetworks     map[string]struct{}
 	selfNetworksHash string
 
-	containerMu     sync.RWMutex
-	containersByRef map[string]dockerContainerMeta
-	execToContainer map[string]dockerExecCacheEntry
+	containerMu       sync.RWMutex
+	containersByRef   map[string]dockerContainerMeta
+	missingContainers map[string]time.Time
+	execToContainer   map[string]dockerExecCacheEntry
 }
 
 // Getters thread-safe
@@ -127,6 +128,7 @@ func (c *ProxyConfig) SetContainerIndex(m map[string]dockerContainerMeta) {
 	c.containerMu.Lock()
 	defer c.containerMu.Unlock()
 	c.containersByRef = m
+	c.missingContainers = make(map[string]time.Time)
 }
 
 func (c *ProxyConfig) GetContainer(ref string) (dockerContainerMeta, bool) {
@@ -139,14 +141,49 @@ func (c *ProxyConfig) GetContainer(ref string) (dockerContainerMeta, bool) {
 func (c *ProxyConfig) UpsertContainer(meta dockerContainerMeta) {
 	c.containerMu.Lock()
 	defer c.containerMu.Unlock()
-	next := make(map[string]dockerContainerMeta, len(c.containersByRef)+3)
-	for k, v := range c.containersByRef {
-		next[k] = v
+	if c.containersByRef == nil {
+		c.containersByRef = make(map[string]dockerContainerMeta)
 	}
 	for _, ref := range meta.refs() {
-		next[ref] = meta
+		c.containersByRef[ref] = meta
+		delete(c.missingContainers, ref)
 	}
-	c.containersByRef = next
+}
+
+func (c *ProxyConfig) ContainerRecentlyMissing(ref string) bool {
+	c.containerMu.Lock()
+	defer c.containerMu.Unlock()
+	key := normalizeContainerRef(ref)
+	expiresAt, ok := c.missingContainers[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiresAt) {
+		delete(c.missingContainers, key)
+		return false
+	}
+	return true
+}
+
+func (c *ProxyConfig) MarkContainerMissing(ref string) {
+	c.containerMu.Lock()
+	defer c.containerMu.Unlock()
+	if c.missingContainers == nil {
+		c.missingContainers = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for key, expiresAt := range c.missingContainers {
+		if now.After(expiresAt) {
+			delete(c.missingContainers, key)
+		}
+	}
+	if len(c.missingContainers) >= maxMissingContainerEntries {
+		for key := range c.missingContainers {
+			delete(c.missingContainers, key)
+			break
+		}
+	}
+	c.missingContainers[normalizeContainerRef(ref)] = now.Add(missingContainerTTL)
 }
 
 func (c *ProxyConfig) SetExecContainer(execID, containerID string) {
@@ -183,8 +220,10 @@ func (c *ProxyConfig) GetExecContainer(execID string) (string, bool) {
 }
 
 const (
-	execCacheTTL        = 15 * time.Minute
-	maxExecCacheEntries = 4096
+	execCacheTTL               = 15 * time.Minute
+	maxExecCacheEntries        = 4096
+	missingContainerTTL        = 10 * time.Second
+	maxMissingContainerEntries = 1024
 )
 
 type dockerExecCacheEntry struct {

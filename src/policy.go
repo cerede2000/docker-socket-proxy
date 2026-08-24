@@ -253,6 +253,9 @@ func resolveContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client
 	if meta, ok := cfg.GetContainer(ref); ok {
 		return meta, nil
 	}
+	if cfg.ContainerRecentlyMissing(ref) {
+		return dockerContainerMeta{}, fmt.Errorf("docker container %q was not found recently", ref)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/containers/"+url.PathEscape(normalizeContainerRef(ref))+"/json", nil)
 	if err != nil {
 		return dockerContainerMeta{}, err
@@ -263,6 +266,9 @@ func resolveContainer(ctx context.Context, cfg *ProxyConfig, client *http.Client
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			cfg.MarkContainerMissing(ref)
+		}
 		return dockerContainerMeta{}, fmt.Errorf("docker inspect container %q: status %d", ref, resp.StatusCode)
 	}
 	var inspect dockerContainerInspect

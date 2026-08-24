@@ -250,6 +250,8 @@ Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias d
 
 La création d'une session exec via `POST /containers/{id}/exec` exige les trois droits explicites `containers: true`, `exec: true` et `post: true`. `allow_all` n'active jamais `exec`.
 
+`GET /containers/{id}/stats` reste volontairement inclus dans le droit général de lecture `containers`. Cette route expose la télémétrie d'exécution, respecte la portée de conteneurs configurée et ne possède pas de commutateur `allow_stats` distinct.
+
 `allow_all: true` est un raccourci groupé mais limité à la portée pour toutes les options `allow_*` du tableau. Ce n'est volontairement **pas** un droit Docker global : il n'active ni `containers`, ni `exec`, ni `post`, ni une autre famille d'API et ne contourne pas les portées de conteneurs. L'envoi d'une archive et les autres écritures génériques nécessitent donc toujours `post: true`. Traitez-le comme un droit à fort impact : `export` peut lire tout le système de fichiers du conteneur et la lecture d'archive peut exposer n'importe quel fichier de la cible.
 
 Exemple minimal limité au cycle de vie :

@@ -40,7 +40,10 @@ func TestParseConfigUsesEnvironment(t *testing.T) {
 	t.Setenv("DOCKER_SOCKET_PATH", "/run/custom.sock")
 	t.Setenv("SOCKETPROXY_PROFILE_FILE", "/tmp/profiles.yml")
 
-	cfg := parseConfig(nil, log.New(io.Discard, "", 0))
+	cfg, err := parseConfig(nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Listen != ":4242" {
 		t.Fatalf("Listen = %q, want %q", cfg.Listen, ":4242")
 	}
@@ -56,7 +59,10 @@ func TestParseConfigCLIOverridesEnvironment(t *testing.T) {
 	t.Setenv("PROXY_PORT", "4242")
 	t.Setenv("DOCKER_SOCKET_PATH", "/run/env.sock")
 
-	cfg := parseConfig([]string{"--listen=:5252", "--socket=/run/cli.sock"}, log.New(io.Discard, "", 0))
+	cfg, err := parseConfig([]string{"--listen=:5252", "--socket=/run/cli.sock"}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Listen != ":5252" {
 		t.Fatalf("Listen = %q, want %q", cfg.Listen, ":5252")
 	}
@@ -65,14 +71,9 @@ func TestParseConfigCLIOverridesEnvironment(t *testing.T) {
 	}
 }
 
-func TestParseConfigWarnsAboutUnknownProfileOption(t *testing.T) {
-	var logs bytes.Buffer
-	cfg := parseConfig([]string{"--traefik.pingg=1"}, log.New(&logs, "", 0))
-	if !strings.Contains(logs.String(), `WARNING profile="traefik" option="pingg"`) {
-		t.Fatalf("unknown option was not reported: %q", logs.String())
-	}
-	if cfg.GetService("traefik") == nil {
-		t.Fatal("deny-by-default profile was not retained")
+func TestParseConfigRejectsUnknownProfileOption(t *testing.T) {
+	if _, err := parseConfig([]string{"--traefik.pingg=1"}, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("unknown CLI profile option was accepted")
 	}
 }
 
@@ -365,6 +366,34 @@ func TestResolveExecContainerRejectsMissingContainerID(t *testing.T) {
 	cfg := &ProxyConfig{containersByRef: make(map[string]dockerContainerMeta), execToContainer: make(map[string]dockerExecCacheEntry)}
 	if _, err := resolveExecContainer(context.Background(), cfg, client, "exec-id"); err == nil {
 		t.Fatal("exec inspect without ContainerID was accepted")
+	}
+}
+
+func TestResolveContainerCachesNotFoundResponses(t *testing.T) {
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	})}
+	cfg := &ProxyConfig{containersByRef: make(map[string]dockerContainerMeta), missingContainers: make(map[string]time.Time)}
+
+	for i := 0; i < 2; i++ {
+		if _, err := resolveContainer(context.Background(), cfg, client, "missing"); err == nil {
+			t.Fatal("missing container was resolved")
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("Docker received %d missing-container inspections, want 1", requests)
+	}
+}
+
+func TestMissingContainerCacheIsBounded(t *testing.T) {
+	cfg := &ProxyConfig{missingContainers: make(map[string]time.Time)}
+	for i := 0; i <= maxMissingContainerEntries; i++ {
+		cfg.MarkContainerMissing(fmt.Sprintf("missing-%d", i))
+	}
+	if got := len(cfg.missingContainers); got != maxMissingContainerEntries {
+		t.Fatalf("missing-container cache size = %d, want %d", got, maxMissingContainerEntries)
 	}
 }
 

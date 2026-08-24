@@ -305,7 +305,7 @@ func debounceDelayFromEnv(logger *log.Logger) time.Duration {
 	return def
 }
 
-func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
+func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 	// Fichier de profils par défaut
 	profilesPath := strings.TrimSpace(os.Getenv("SOCKETPROXY_PROFILE_FILE"))
 	if profilesPath == "" {
@@ -330,17 +330,18 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 	}
 
 	cfg := &ProxyConfig{
-		Listen:           listen,
-		SocketPath:       socketPath,
-		DiscoverInterval: discoverIntervalFromEnv(logger),
-		DebounceDelay:    debounceDelayFromEnv(logger),
-		ProfilesFile:     profilesPath,
-		baseServices:     make(map[string]*ServiceConfig),
-		services:         make(map[string]*ServiceConfig),
-		ipToRole:         make(map[string]string),
-		selfNetworks:     make(map[string]struct{}),
-		containersByRef:  make(map[string]dockerContainerMeta),
-		execToContainer:  make(map[string]dockerExecCacheEntry),
+		Listen:            listen,
+		SocketPath:        socketPath,
+		DiscoverInterval:  discoverIntervalFromEnv(logger),
+		DebounceDelay:     debounceDelayFromEnv(logger),
+		ProfilesFile:      profilesPath,
+		baseServices:      make(map[string]*ServiceConfig),
+		services:          make(map[string]*ServiceConfig),
+		ipToRole:          make(map[string]string),
+		selfNetworks:      make(map[string]struct{}),
+		containersByRef:   make(map[string]dockerContainerMeta),
+		missingContainers: make(map[string]time.Time),
+		execToContainer:   make(map[string]dockerExecCacheEntry),
 	}
 
 	for _, arg := range args {
@@ -400,7 +401,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 			role := normalizeRoleName(profileKey)
 			svc := ensureService(cfg.baseServices, role)
 			if err := applyFlagValue(svc, flagKey, valStr); err != nil {
-				logger.Printf("[config] WARNING profile=%q option=%q: %v", role, flagKey, err)
+				return nil, fmt.Errorf("profile %q option %q: %w", role, flagKey, err)
 			}
 		} else {
 			role := normalizeRoleName(opt)
@@ -432,23 +433,12 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		}
 	}
 
-	return cfg
+	return cfg, nil
 }
 
 // -----------------------------
 // Parser YAML des profils
 // -----------------------------
-
-var knownProfileKeys = map[string]struct{}{
-	"ping": {}, "version": {}, "info": {}, "events": {}, "event": {}, "auth": {},
-	"build": {}, "commit": {}, "configs": {}, "containers": {}, "distribution": {},
-	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
-	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
-	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_inspect": {}, "allow_logs": {},
-	"allow_pause": {}, "allow_restart": {}, "allow_restarts": {}, "allow_start": {}, "allow_stop": {},
-	"allow_top": {}, "allow_unpause": {}, "allow_kill": {},
-	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},
-}
 
 func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 	var raw map[string]map[string]any
@@ -467,9 +457,6 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 		}
 		svc := ensureService(profiles, role)
 		for key, value := range values {
-			if _, known := knownProfileKeys[key]; !known {
-				return nil, fmt.Errorf("profile %q: unknown key %q", role, key)
-			}
 			switch key {
 			case "allowed_containers", "blocked_containers":
 				items, ok := value.([]any)

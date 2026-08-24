@@ -249,6 +249,8 @@ All these options default to `false`. `allow_restarts` remains an alias for `all
 
 Creating an exec session with `POST /containers/{id}/exec` requires all three explicit grants: `containers: true`, `exec: true`, and `post: true`. `allow_all` never enables `exec`.
 
+`GET /containers/{id}/stats` deliberately remains part of the general `containers` read permission. It exposes runtime telemetry, follows the configured container scope, and has no independent `allow_stats` switch.
+
 `allow_all: true` is a grouped but scoped convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `exec`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`. Treat it as a high-impact permission: `export` can read the complete container filesystem and archive reads can disclose arbitrary files inside the selected container.
 
 Minimal lifecycle-only example:

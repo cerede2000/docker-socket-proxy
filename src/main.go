@@ -28,7 +28,11 @@ func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	logger.Printf("[main] starting docker-socket-proxy version=%s git=%s", version, gitSha)
 
-	cfg := parseConfig(os.Args[1:], logger)
+	cfg, err := parseConfig(os.Args[1:], logger)
+	if err != nil {
+		logger.Printf("[main] invalid configuration: %v", err)
+		os.Exit(2)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
