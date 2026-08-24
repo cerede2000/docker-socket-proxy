@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -255,6 +258,50 @@ func TestFeaturePermissionMatrix(t *testing.T) {
 	}
 }
 
+func TestProxyLogsEscapeUntrustedPath(t *testing.T) {
+	var logs bytes.Buffer
+	handler := proxyHandler(&ProxyConfig{ipToRole: map[string]string{}}, nil, nil, log.New(&logs, "", 0))
+	req := httptest.NewRequest(http.MethodGet, "http://proxy/version", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
+	req.URL.Path = "/version\nforged-log-line"
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if got := strings.Count(strings.TrimSpace(logs.String()), "\n"); got != 0 {
+		t.Fatalf("untrusted path created extra log lines: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), `\nforged-log-line`) {
+		t.Fatalf("escaped path missing from log: %q", logs.String())
+	}
+}
+
+func TestExecCacheIsBoundedAndExpires(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	for i := 0; i <= maxExecCacheEntries; i++ {
+		cfg.SetExecContainer(fmt.Sprintf("exec-%d", i), "container")
+	}
+	if len(cfg.execToContainer) != maxExecCacheEntries {
+		t.Fatalf("exec cache size = %d, want %d", len(cfg.execToContainer), maxExecCacheEntries)
+	}
+	cfg.execToContainer["expired"] = dockerExecCacheEntry{ContainerID: "old", ExpiresAt: time.Now().Add(-time.Second)}
+	if _, ok := cfg.GetExecContainer("expired"); ok {
+		t.Fatal("expired exec cache entry was returned")
+	}
+}
+
+func TestScopeResponseFilterRejectsCompressedBodies(t *testing.T) {
+	ctx := context.WithValue(context.Background(), responseFilterContextKey{}, &responseFilterContext{
+		service: &ServiceConfig{}, kind: filterContainerList,
+	})
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+		Body:       io.NopCloser(strings.NewReader("compressed")),
+		Request:    httptest.NewRequest(http.MethodGet, "http://proxy/containers/json", nil).WithContext(ctx),
+	}
+	if err := scopeResponseFilter(&ProxyConfig{})(resp); err == nil {
+		t.Fatal("compressed scoped response was accepted")
+	}
+}
+
 func TestRewriteAPIVersion(t *testing.T) {
 	tests := map[string]string{
 		"/containers/json":       "/v1.51/containers/json",
@@ -358,7 +405,7 @@ func TestEnforceContainerScopeUsesCachedCanonicalID(t *testing.T) {
 			ID:    meta.ID,
 			Names: []string{"/traefik"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "allowlist",
@@ -383,7 +430,7 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 			ID:    "0123456789abcdef",
 			Names: []string{"/docker-socket-proxy"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "blacklist",
@@ -407,7 +454,7 @@ func TestEnforceContainerScopeAllowsOnlySafeReadOnlyRoutes(t *testing.T) {
 			ID:    "0123456789abcdef",
 			Names: []string{"/dockman"},
 		}}),
-		execToContainer: make(map[string]string),
+		execToContainer: make(map[string]dockerExecCacheEntry),
 	}
 	service := &ServiceConfig{
 		ContainerScope:    "all",

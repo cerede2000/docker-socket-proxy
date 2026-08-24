@@ -355,7 +355,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		ipToRole:         make(map[string]string),
 		selfNetworks:     make(map[string]struct{}),
 		containersByRef:  make(map[string]dockerContainerMeta),
-		execToContainer:  make(map[string]string),
+		execToContainer:  make(map[string]dockerExecCacheEntry),
 	}
 
 	for _, arg := range args {

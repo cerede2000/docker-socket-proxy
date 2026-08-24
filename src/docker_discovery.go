@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -68,14 +69,7 @@ func hashNetworks(nets map[string]struct{}) string {
 		return ""
 	}
 	keys := keysOfSet(nets)
-	// Tri pour avoir un hash stable
-	for i := 0; i < len(keys)-1; i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
+	sort.Strings(keys)
 	return strings.Join(keys, ",")
 }
 
@@ -122,15 +116,10 @@ func getSelfNetworksWithCache(ctx context.Context, cfg *ProxyConfig, client *htt
 
 	newHash := hashNetworks(nets)
 
-	// Si le hash n'a pas changé, on garde le cache
-	if cfg.selfNetworksHash != "" && cfg.selfNetworksHash == newHash {
+	if !cfg.updateSelfNetworks(nets, newHash) {
 		logger.Printf("[discover] self networks unchanged (cache hit)")
 		return nil
 	}
-
-	// Mise à jour du cache
-	cfg.selfNetworks = nets
-	cfg.selfNetworksHash = newHash
 	logger.Printf("[discover] self networks updated (cache miss)")
 
 	return nil
@@ -180,6 +169,7 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 
 	newMap := make(map[string]string)
 	newIndex := buildContainerIndex(containers)
+	selfNetworks := cfg.getSelfNetworks()
 
 	for _, c := range containers {
 		if c.State != "running" {
@@ -202,14 +192,14 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 		svc := cfg.GetService(role)
 		if svc == nil {
 			logger.Printf("[discover] container=%s id=%s role=%s -> no matching profile, skipping",
-				name, c.ID[:12], role)
+				name, shortID(c.ID), role)
 			continue
 		}
 
 		var ips []string
 		for netName, nw := range c.NetworkSettings.Networks {
-			if len(cfg.selfNetworks) > 0 {
-				if _, ok := cfg.selfNetworks[netName]; !ok {
+			if len(selfNetworks) > 0 {
+				if _, ok := selfNetworks[netName]; !ok {
 					continue
 				}
 			}
@@ -221,7 +211,7 @@ func discoverOnce(ctx context.Context, cfg *ProxyConfig, client *http.Client, lo
 		}
 
 		if len(ips) > 0 {
-			logger.Printf("[discover] container=%s id=%s role=%s ips=%v", name, c.ID[:12], role, ips)
+			logger.Printf("[discover] container=%s id=%s role=%s ips=%v", name, shortID(c.ID), role, ips)
 		}
 	}
 
@@ -317,43 +307,26 @@ func newEventDebouncer(delay time.Duration, callback func()) *eventDebouncer {
 
 func (d *eventDebouncer) trigger() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	d.pendingEvents++
 
-	// Mode 3 : Si le delay est 0, on déclenche toujours immédiatement (pas de debouncing)
 	if d.delay == 0 {
 		d.lastTrigger = time.Now()
-		count := d.pendingEvents
 		d.pendingEvents = 0
-
 		d.mu.Unlock()
-		if count > 0 {
-			d.callback()
-		}
-		d.mu.Lock()
+		d.mu.Unlock()
+		d.callback()
 		return
 	}
 
-	// Mode 1 : Si c'est le premier événement ou si le dernier trigger date de plus de 2x le delay,
-	// on déclenche immédiatement pour éviter les latences
 	timeSinceLastTrigger := time.Since(d.lastTrigger)
 	if d.lastTrigger.IsZero() || timeSinceLastTrigger > d.delay*2 {
-		// Déclencher immédiatement
 		d.lastTrigger = time.Now()
-		count := d.pendingEvents
 		d.pendingEvents = 0
-
-		// Unlock avant d'appeler le callback
 		d.mu.Unlock()
-		if count > 0 {
-			d.callback()
-		}
-		d.mu.Lock()
+		d.callback()
 		return
 	}
 
-	// Mode 2 : Rafale d'événements - utiliser le debouncing normal
 	if d.timer != nil {
 		d.timer.Stop()
 	}
@@ -369,6 +342,7 @@ func (d *eventDebouncer) trigger() {
 			d.callback()
 		}
 	})
+	d.mu.Unlock()
 }
 
 func (d *eventDebouncer) stop() {

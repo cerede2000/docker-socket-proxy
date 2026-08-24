@@ -60,7 +60,12 @@ func main() {
 		if err := discoverOnce(ctx, cfg, discoveryClient, logger); err != nil {
 			logger.Printf("[discover] initial discovery attempt %d/%d failed: %v", i+1, maxRetries, err)
 			if i < maxRetries-1 {
-				time.Sleep(retryDelay)
+				select {
+				case <-ctx.Done():
+					logger.Printf("[main] startup cancelled during initial discovery")
+					return
+				case <-time.After(retryDelay):
+				}
 				retryDelay = retryDelay * 2 // Backoff
 			}
 		} else {
@@ -105,13 +110,19 @@ func main() {
 	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
 		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
+	serverErrors := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("http server error: %v", err)
+			serverErrors <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrors:
+		logger.Printf("[main] http server error: %v", err)
+		stop()
+	}
 	logger.Printf("[main] shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

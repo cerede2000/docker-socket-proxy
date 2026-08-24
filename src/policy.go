@@ -631,6 +631,9 @@ func scopeResponseFilter(cfg *ProxyConfig) func(*http.Response) error {
 		if filter == nil || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return nil
 		}
+		if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			return fmt.Errorf("cannot safely scope Docker response with content encoding %q", encoding)
+		}
 		switch filter.kind {
 		case filterContainerList:
 			filterContainerListResponse(resp, cfg, filter.service)
