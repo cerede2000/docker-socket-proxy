@@ -44,6 +44,7 @@ jobs:
         with:
           version: "2026.2.1"
           install-go: false
+          use-cache: false
 
       - name: Test
         run: go test -race ./...
