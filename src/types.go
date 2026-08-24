@@ -33,6 +33,7 @@ type ServiceConfig struct {
 	Volumes      bool
 
 	Post         bool
+	AllowAll     bool
 	AllowArchive bool
 	AllowChanges bool
 	AllowExport  bool

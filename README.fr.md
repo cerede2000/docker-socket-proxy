@@ -235,7 +235,9 @@ Les écritures génériques (`POST`, `PUT`, `PATCH`, `DELETE`) restent interdite
 | `allow_unpause` | `/containers/{id}/unpause` | non |
 | `allow_kill` | `/containers/{id}/kill` | non |
 
-Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias de `allow_restart` ; contrairement au commutateur groupé de LinuxServer, il n'accorde pas implicitement `stop` ou `kill`. Ces droits doivent être explicitement ajoutés. Il n'existe volontairement aucun `allow_all` global : `post` contrôle les écritures larges, les familles d'API restent explicites et les routes sensibles conservent leurs propres droits.
+Toutes ces options valent `false` par défaut. `allow_restarts` reste un alias de `allow_restart` ; contrairement au commutateur groupé de LinuxServer, il n'accorde pas implicitement `stop` ou `kill`. Ces droits doivent être explicitement ajoutés.
+
+`allow_all: true` est un raccourci pour toutes les options `allow_*` du tableau. Ce n'est volontairement **pas** un droit Docker global : il n'active ni `containers`, ni `post`, ni une autre famille d'API et ne contourne pas les portées de conteneurs. L'envoi d'une archive et les autres écritures génériques nécessitent donc toujours `post: true`.
 
 Exemple minimal limité au cycle de vie :
 
@@ -250,6 +252,15 @@ container-operator:
   allow_restart: true
   allow_pause: true
   allow_unpause: true
+```
+
+Tous les contrôles ciblés des conteneurs, sans activer les autres familles Docker :
+
+```yaml
+container-manager:
+  containers: true
+  post: true
+  allow_all: true
 ```
 
 `apirewrite` force une version d'API Docker pour un profil, par exemple `apirewrite: "1.53"`.

@@ -234,7 +234,9 @@ Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even i
 | `allow_unpause` | `/containers/{id}/unpause` | no |
 | `allow_kill` | `/containers/{id}/kill` | no |
 
-All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required. There is intentionally no global `allow_all`: broad writes require `post`, API families remain explicit, and sensitive container routes keep their own switches.
+All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required.
+
+`allow_all: true` is a convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`.
 
 Minimal lifecycle-only example:
 
@@ -249,6 +251,15 @@ container-operator:
   allow_restart: true
   allow_pause: true
   allow_unpause: true
+```
+
+Complete targeted container controls, without enabling unrelated Docker API families:
+
+```yaml
+container-manager:
+  containers: true
+  post: true
+  allow_all: true
 ```
 
 `apirewrite` forces a Docker API version for a profile, for example `apirewrite: "1.53"`.

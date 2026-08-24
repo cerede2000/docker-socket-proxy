@@ -113,6 +113,8 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 		s.Volumes = b
 	case "post":
 		s.Post = b
+	case "allow_all":
+		s.AllowAll = b
 	case "allow_archive":
 		s.AllowArchive = b
 	case "allow_changes":
@@ -454,7 +456,7 @@ var knownProfileKeys = map[string]struct{}{
 	"build": {}, "commit": {}, "configs": {}, "containers": {}, "distribution": {},
 	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
 	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
-	"post": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_logs": {},
+	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_logs": {},
 	"allow_pause": {}, "allow_restart": {}, "allow_restarts": {}, "allow_start": {}, "allow_stop": {},
 	"allow_top": {}, "allow_unpause": {}, "allow_kill": {},
 	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},

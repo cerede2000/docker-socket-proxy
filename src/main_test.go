@@ -169,6 +169,26 @@ func TestSensitiveContainerReadsAreExplicitlyGated(t *testing.T) {
 	}
 }
 
+func TestAllowAllOnlyExpandsTargetedContainerPermissions(t *testing.T) {
+	service := &ServiceConfig{Containers: true, AllowAll: true}
+	for _, action := range []string{"archive", "changes", "export", "logs", "top"} {
+		if !service.Allow("containers", http.MethodGet, action) {
+			t.Errorf("allow_all did not grant container read %q", action)
+		}
+	}
+	for _, action := range []string{"start", "stop", "restart", "pause", "unpause", "kill"} {
+		if !service.Allow("containers", http.MethodPost, action) {
+			t.Errorf("allow_all did not grant lifecycle action %q", action)
+		}
+	}
+	if service.Allow("containers", http.MethodPost, "rename") {
+		t.Fatal("allow_all unexpectedly bypassed post for a generic write")
+	}
+	if service.Allow("images", http.MethodGet, "") {
+		t.Fatal("allow_all unexpectedly enabled another API family")
+	}
+}
+
 func TestRewriteAPIVersion(t *testing.T) {
 	tests := map[string]string{
 		"/containers/json":       "/v1.51/containers/json",
