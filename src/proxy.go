@@ -78,28 +78,28 @@ func proxyHandler(cfg *ProxyConfig, resolverClient *http.Client, proxy *httputil
 
 		// Health local : accès direct à /version depuis localhost
 		if isLocalIP(host) && isVersionPath(path) {
-			logger.Printf("[health] local check ip=%s method=%s path=%s", host, method, path)
+			logger.Printf("[health] local check ip=%q method=%q path=%q", host, method, path)
 			proxy.ServeHTTP(w, r)
 			return
 		}
 
 		role := cfg.GetRole(host)
 		if role == "" {
-			logger.Printf("[deny] ip=%s role=<none> method=%s path=%s", host, method, path)
+			logger.Printf("[deny] ip=%q role=<none> method=%q path=%q", host, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
 		svc := cfg.GetService(role)
 		if svc == nil {
-			logger.Printf("[deny] ip=%s role=%s (unknown) method=%s path=%s", host, role, method, path)
+			logger.Printf("[deny] ip=%q role=%q (unknown) method=%q path=%q", host, role, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
 		feature, action := classifyPath(path)
 		if !svc.Allow(feature, method, action) {
-			logger.Printf("[deny] ip=%s role=%s feature=%s action=%s method=%s path=%s",
+			logger.Printf("[deny] ip=%q role=%q feature=%q action=%q method=%q path=%q",
 				host, role, feature, action, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -107,7 +107,7 @@ func proxyHandler(cfg *ProxyConfig, resolverClient *http.Client, proxy *httputil
 
 		responseFilter, err := enforceContainerScope(r.Context(), cfg, resolverClient, svc, feature, r)
 		if err != nil {
-			logger.Printf("[deny] ip=%s role=%s feature=%s method=%s path=%s scope=%s reason=%v",
+			logger.Printf("[deny] ip=%q role=%q feature=%q method=%q path=%q scope=%q reason=%v",
 				host, role, feature, method, path, svc.ContainerScope, err)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -121,14 +121,14 @@ func proxyHandler(cfg *ProxyConfig, resolverClient *http.Client, proxy *httputil
 		if svc.APIRewrite != "" {
 			r.URL.Path = rewriteAPIVersion(r.URL.Path, svc.APIRewrite)
 			if r.URL.Path != originalPath {
-				logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s -> rewritten to=%s (api=%s)",
+				logger.Printf("[req] ip=%q role=%q feature=%q action=%q method=%q path=%q -> rewritten to=%q (api=%q)",
 					host, role, feature, action, method, originalPath, r.URL.Path, svc.APIRewrite)
 			} else {
-				logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s (api=%s)",
+				logger.Printf("[req] ip=%q role=%q feature=%q action=%q method=%q path=%q (api=%q)",
 					host, role, feature, action, method, path, svc.APIRewrite)
 			}
 		} else {
-			logger.Printf("[req] ip=%s role=%s feature=%s action=%s method=%s path=%s",
+			logger.Printf("[req] ip=%q role=%q feature=%q action=%q method=%q path=%q",
 				host, role, feature, action, method, path)
 		}
 

@@ -2,6 +2,7 @@ home:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
 
 # `all` est le comportement historique : ce profil dispose de ses droits sur
 # tous les conteneurs.
@@ -19,6 +20,7 @@ administrator:
   allow_archive: true
   allow_changes: true
   allow_export: true
+  allow_inspect: true
   allow_logs: true
   allow_top: true
   container_scope: all
@@ -45,6 +47,7 @@ portainer:
   allow_archive: true
   allow_changes: true
   allow_export: true
+  allow_inspect: true
   allow_logs: true
   allow_top: true
 
@@ -54,6 +57,7 @@ traefik-manager:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   post: true
   allow_start: true
   allow_stop: true
@@ -67,6 +71,7 @@ operator:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -85,6 +90,7 @@ auditor:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   container_scope: all
   container_rules:
     - name: docker-socket-proxy
@@ -115,6 +121,7 @@ dockhand:
   allow_archive: true
   allow_changes: true
   allow_export: true
+  allow_inspect: true
   allow_logs: true
   allow_top: true
   container_scope: blacklist

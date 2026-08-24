@@ -4,4 +4,5 @@
 compose.yml
 config
 README.md
+README.fr.md
 **/*_test.go

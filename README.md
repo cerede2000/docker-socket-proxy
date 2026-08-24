@@ -39,10 +39,12 @@ This lets an operator such as Portainer retain broad access where it is genuinel
 - The proxy only keeps client IP addresses shared with its own Docker networks.
 - Container lists, events, and targeted operations obey the same target scope.
 - The internal name / ID cache avoids an additional Docker request for usual authorization checks.
+- The local `/version` health check is accepted without a profile only from the loopback interface. Do not use host networking or publish port `2375`.
+- For scoped profiles, non-container Docker events are intentionally omitted because they cannot be tied safely to an authorized container.
 
 ## Quick start
 
-Create `profiles.yml`, then start the proxy. The Docker socket is mounted read-only: Docker API requests still work over the Unix socket, but the socket file cannot be replaced from inside the container.
+Create `profiles.yml`, then start the proxy. The `:ro` socket mount only prevents replacement of the Unix socket file; it does **not** make Docker API calls read-only. The proxy policy is the security boundary.
 
 ```yaml
 services:
@@ -143,6 +145,7 @@ traefik:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   networks: true
   events: true
   session: true
@@ -151,6 +154,7 @@ traefik-manager:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -225,6 +229,7 @@ Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even i
 | `allow_archive` | `/containers/{id}/archive` | GET/HEAD: no; PUT: yes |
 | `allow_changes` | `/containers/{id}/changes` | no |
 | `allow_export` | `/containers/{id}/export` | no |
+| `allow_inspect` | `/containers/{id}/json` | no |
 | `allow_logs` | `/containers/{id}/logs` | no |
 | `allow_top` | `/containers/{id}/top` | no |
 | `allow_start` | `/containers/{id}/start` | no |
@@ -236,7 +241,9 @@ Generic write methods (`POST`, `PUT`, `PATCH`, `DELETE`) remain forbidden even i
 
 All these options default to `false`. `allow_restarts` remains an alias for `allow_restart`; unlike LinuxServer's grouped switch, it deliberately does not silently grant `stop` or `kill`. Grant those operations explicitly when required.
 
-`allow_all: true` is a convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`.
+Creating an exec session with `POST /containers/{id}/exec` requires all three explicit grants: `containers: true`, `exec: true`, and `post: true`. `allow_all` never enables `exec`.
+
+`allow_all: true` is a grouped but scoped convenience shortcut for every `allow_*` option in the table. It is deliberately **not** a global Docker permission: it does not enable `containers`, `exec`, `post`, any other API family, or bypass container scopes. Archive upload and other generic writes therefore still require `post: true`. Treat it as a high-impact permission: `export` can read the complete container filesystem and archive reads can disclose arbitrary files inside the selected container.
 
 Minimal lifecycle-only example:
 
@@ -268,6 +275,10 @@ container-manager:
 
 Names are Docker container names without the `/` prefix. Scope rules apply to lists, events, inspect, logs, stats, exec, network operations, and targeted actions.
 
+### Scope limits
+
+Container scope applies only where a Docker request can be tied to a container. For a scoped profile, global container operations (`create`, `prune`) and destructive image, volume, or non-targeted network writes are denied. Read access to the `images`, `volumes`, and global `networks` families is not filtered per container. Avoid granting these families together with `post: true` unless the client genuinely administers the whole host.
+
 ### Broad access: `all`
 
 `all` is the default. The profile keeps its rights over every container; add a `deny` rule to remove a critical target.
@@ -277,6 +288,7 @@ portainer:
   ping: true
   version: true
   containers: true
+  allow_inspect: true
   images: true
   networks: true
   post: true
@@ -296,6 +308,7 @@ Containers absent from `allowed_containers` are hidden and inaccessible.
 ```yaml
 traefik-manager:
   containers: true
+  allow_inspect: true
   post: true
   allow_restart: true
   container_scope: allowlist
@@ -310,6 +323,7 @@ Containers in `blocked_containers` are hidden and every operation targeting them
 dockhand:
   ping: true
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -326,6 +340,7 @@ dockhand:
 ```yaml
 dockhand:
   containers: true
+  allow_inspect: true
   events: true
   post: true
   allow_start: true
@@ -369,3 +384,7 @@ The proxy logs profile discovery and denials. A client with no role, an unknown 
 go test -race ./...
 go vet ./...
 ```
+
+## License
+
+Licensed under the [MIT License](LICENSE).

@@ -26,10 +26,7 @@ func parseBoolString(s string) bool {
 
 func normalizeRoleName(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
-	if strings.HasPrefix(n, "proxy-") {
-		n = strings.TrimPrefix(n, "proxy-")
-	}
-	return n
+	return strings.TrimPrefix(n, "proxy-")
 }
 
 func ensureService(m map[string]*ServiceConfig, role string) *ServiceConfig {
@@ -47,22 +44,7 @@ func ensureService(m map[string]*ServiceConfig, role string) *ServiceConfig {
 	return s
 }
 
-func anyRightsSet(s *ServiceConfig) bool {
-	return s.Ping || s.Version || s.Info || s.Events || s.Auth ||
-		s.Build || s.Commit || s.Configs || s.Containers || s.Distribution ||
-		s.Exec || s.Images || s.Networks || s.Nodes || s.Plugins ||
-		s.Secrets || s.Services || s.Session || s.Swarm ||
-		s.System || s.Tasks || s.Volumes
-}
-
-func applyDefaultProfileFlags(s *ServiceConfig, role string) {
-	// AUCUN DROIT PAR DÉFAUT
-	// Les droits doivent être explicitement définis dans profiles.yml ou via CLI
-	// Principe du moindre privilège : deny by default
-	return
-}
-
-func applyFlagValue(s *ServiceConfig, flag, value string) {
+func applyFlagValue(s *ServiceConfig, flag, value string) error {
 	b := parseBoolString(value)
 	f := strings.ToLower(strings.TrimSpace(flag))
 
@@ -121,6 +103,8 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 		s.AllowChanges = b
 	case "allow_export":
 		s.AllowExport = b
+	case "allow_inspect":
+		s.AllowInspect = b
 	case "allow_logs":
 		s.AllowLogs = b
 	case "allow_pause":
@@ -163,18 +147,21 @@ func applyFlagValue(s *ServiceConfig, flag, value string) {
 	case "container_rule":
 		parts := strings.SplitN(value, ":", 2)
 		if len(parts) != 2 {
-			return
+			return fmt.Errorf("container_rule must use name:access")
 		}
 		name := normalizeContainerRef(parts[0])
 		access := ContainerAccess(strings.ToLower(strings.TrimSpace(parts[1])))
 		if name == "" || (access != containerAccessDeny && access != containerAccessReadOnly) {
-			return
+			return fmt.Errorf("container_rule access must be readonly or deny")
 		}
 		if s.ContainerRules == nil {
 			s.ContainerRules = make(map[string]ContainerAccess)
 		}
 		s.ContainerRules[name] = access
+	default:
+		return fmt.Errorf("unknown profile option %q", flag)
 	}
+	return nil
 }
 
 func cloneServices(in map[string]*ServiceConfig) map[string]*ServiceConfig {
@@ -353,7 +340,7 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 		ipToRole:         make(map[string]string),
 		selfNetworks:     make(map[string]struct{}),
 		containersByRef:  make(map[string]dockerContainerMeta),
-		execToContainer:  make(map[string]string),
+		execToContainer:  make(map[string]dockerExecCacheEntry),
 	}
 
 	for _, arg := range args {
@@ -412,11 +399,12 @@ func parseConfig(args []string, logger *log.Logger) *ProxyConfig {
 
 			role := normalizeRoleName(profileKey)
 			svc := ensureService(cfg.baseServices, role)
-			applyFlagValue(svc, flagKey, valStr)
+			if err := applyFlagValue(svc, flagKey, valStr); err != nil {
+				logger.Printf("[config] WARNING profile=%q option=%q: %v", role, flagKey, err)
+			}
 		} else {
 			role := normalizeRoleName(opt)
-			svc := ensureService(cfg.baseServices, role)
-			applyDefaultProfileFlags(svc, role)
+			ensureService(cfg.baseServices, role)
 		}
 	}
 
@@ -456,7 +444,7 @@ var knownProfileKeys = map[string]struct{}{
 	"build": {}, "commit": {}, "configs": {}, "containers": {}, "distribution": {},
 	"exec": {}, "images": {}, "networks": {}, "nodes": {}, "plugins": {}, "secrets": {},
 	"services": {}, "session": {}, "swarm": {}, "system": {}, "tasks": {}, "volumes": {},
-	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_logs": {},
+	"post": {}, "allow_all": {}, "allow_archive": {}, "allow_changes": {}, "allow_export": {}, "allow_inspect": {}, "allow_logs": {},
 	"allow_pause": {}, "allow_restart": {}, "allow_restarts": {}, "allow_start": {}, "allow_stop": {},
 	"allow_top": {}, "allow_unpause": {}, "allow_kill": {},
 	"apirewrite": {}, "container_scope": {}, "allowed_containers": {}, "blocked_containers": {}, "container_rules": {},
@@ -474,6 +462,9 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 		if role == "" {
 			return nil, fmt.Errorf("empty profile name")
 		}
+		if _, exists := profiles[role]; exists {
+			return nil, fmt.Errorf("profile names %q and %q normalize to the same role %q", role, rawName, role)
+		}
 		svc := ensureService(profiles, role)
 		for key, value := range values {
 			if _, known := knownProfileKeys[key]; !known {
@@ -490,7 +481,9 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 					if !ok || normalizeContainerRef(name) == "" {
 						return nil, fmt.Errorf("profile %q: %s must contain non-empty names", role, key)
 					}
-					applyFlagValue(svc, key, name)
+					if err := applyFlagValue(svc, key, name); err != nil {
+						return nil, fmt.Errorf("profile %q: %w", role, err)
+					}
 				}
 			case "container_rules":
 				items, ok := value.([]any)
@@ -522,7 +515,9 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 			default:
 				switch typed := value.(type) {
 				case bool, string, int, int64, float64:
-					applyFlagValue(svc, key, fmt.Sprint(typed))
+					if err := applyFlagValue(svc, key, fmt.Sprint(typed)); err != nil {
+						return nil, fmt.Errorf("profile %q: %w", role, err)
+					}
 				default:
 					return nil, fmt.Errorf("profile %q: %s must be a scalar", role, key)
 				}
