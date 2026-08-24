@@ -440,6 +440,24 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 // Parser YAML des profils
 // -----------------------------
 
+func validateYAMLProfileKey(key string) error {
+	switch key {
+	case "container_rules":
+		// Structured YAML-only option, handled directly by parseProfilesYAML.
+		return nil
+	case "allowed_container":
+		return fmt.Errorf("unknown profile option %q; use %q in YAML", key, "allowed_containers")
+	case "blocked_container":
+		return fmt.Errorf("unknown profile option %q; use %q in YAML", key, "blocked_containers")
+	case "container_rule":
+		return fmt.Errorf("unknown profile option %q; use %q in YAML", key, "container_rules")
+	default:
+		// Use the canonical option parser as the single source of truth. The
+		// scratch service is discarded; only option-name validation matters.
+		return applyFlagValue(&ServiceConfig{}, key, "")
+	}
+}
+
 func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 	var raw map[string]map[string]any
 	if err := yaml.Unmarshal([]byte(content), &raw); err != nil {
@@ -457,6 +475,9 @@ func parseProfilesYAML(content string) (map[string]*ServiceConfig, error) {
 		}
 		svc := ensureService(profiles, role)
 		for key, value := range values {
+			if err := validateYAMLProfileKey(key); err != nil {
+				return nil, fmt.Errorf("profile %q: %w", role, err)
+			}
 			switch key {
 			case "allowed_containers", "blocked_containers":
 				items, ok := value.([]any)

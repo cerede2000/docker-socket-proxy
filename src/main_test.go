@@ -560,9 +560,38 @@ func TestParseProfilesYAMLRejectsInvalidContainerRule(t *testing.T) {
 }
 
 func TestParseProfilesYAMLRejectsUnknownKey(t *testing.T) {
-	_, err := parseProfilesYAML("manager:\n  containers: true\n  allowd_containers: []\n")
-	if err == nil {
-		t.Fatal("unknown profile key was accepted")
+	for _, tt := range []struct {
+		name       string
+		yaml       string
+		want       string
+		mustNotSay string
+	}{
+		{"unknown list", "manager:\n  allowd_containers: []\n", `unknown profile option "allowd_containers"`, "must be a scalar"},
+		{"unknown scalar", "manager:\n  allowd_containers: true\n", `unknown profile option "allowd_containers"`, "must be a scalar"},
+		{"list option with scalar", "manager:\n  allowed_containers: \"a,b\"\n", "allowed_containers must be a YAML list", "unknown profile option"},
+		{"scalar option with list", "manager:\n  containers: []\n", "containers must be a scalar", "unknown profile option"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseProfilesYAML(tt.yaml)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), tt.mustNotSay) {
+				t.Fatalf("error = %v, want %q and not %q", err, tt.want, tt.mustNotSay)
+			}
+		})
+	}
+}
+
+func TestParseProfilesYAMLRejectsCLISingularAliases(t *testing.T) {
+	for key, plural := range map[string]string{
+		"allowed_container": "allowed_containers",
+		"blocked_container": "blocked_containers",
+		"container_rule":    "container_rules",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := parseProfilesYAML("manager:\n  " + key + ": \"a:readonly\"\n")
+			if err == nil || !strings.Contains(err.Error(), `unknown profile option "`+key+`"`) || !strings.Contains(err.Error(), `use "`+plural+`" in YAML`) {
+				t.Fatalf("unexpected alias error: %v", err)
+			}
+		})
 	}
 }
 
