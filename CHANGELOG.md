@@ -2,6 +2,24 @@
 
 All notable changes are documented here. Release tags use semantic versioning.
 
+## Unreleased
+
+### Added
+
+- A unix socket frontend: `PROXY_LISTEN_UNIX` / `--listen-unix` binds a socket to a single profile, so the socket path and its file permissions carry the client identity instead of its IP address. `PROXY_LISTEN=off` disables the TCP frontend entirely.
+- An end-to-end suite (`e2e/run.sh`, also run in CI) exercises label discovery, container scope, name-to-ID rewriting, response filtering and the unix socket frontend against a real Docker daemon.
+
+### Changed
+
+- The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532.
+- The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter. Go moves to 1.27.1.
+- Unit coverage rises from 46% to 83%; discovery, the event loop, profile reloading and the healthcheck were previously untested.
+
+### Security
+
+- A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.
+- Every GitHub Action is pinned by commit SHA rather than by a movable tag.
+
 ## 1.2.0 - 2026-08-24
 
 ### Security
@@ -10,24 +28,6 @@ All notable changes are documented here. Release tags use semantic versioning.
 - Creating an exec session with `POST /containers/{id}/exec` now requires both `exec: true` and `post: true`.
 - Scoped profiles can no longer perform global image, volume, or network writes because those operations cannot be tied safely to an authorized target container.
 - Uploading an archive with `PUT /containers/{id}/archive` requires both `allow_archive: true` and `post: true`.
-
-### Added
-
-- A unix socket frontend: `PROXY_LISTEN_UNIX` / `--listen-unix` binds a socket to a single profile, so the socket path and its file permissions carry the client identity instead of its IP address. `PROXY_LISTEN=off` disables the TCP frontend entirely.
-
-### Security
-
-- A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.
-- Every GitHub Action is pinned by commit SHA rather than by a movable tag.
-
-### Changed
-
-- The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532.
-- The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter.
-
-### Added
-
-- An end-to-end suite (`e2e/run.sh`, also run in CI) exercises label discovery, container scope, name-to-ID rewriting, response filtering and the unix socket frontend against a real Docker daemon.
 
 ### Migration
 
