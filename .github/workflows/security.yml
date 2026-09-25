@@ -1,0 +1,94 @@
+name: Security
+
+# Le cron est le cœur de ce workflow : une vulnérabilité publiée contre du code
+# qui n'a pas bougé n'est jamais vue par une CI qui ne tourne qu'au push.
+on:
+  push:
+    branches:
+      - main
+      - integration
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  govulncheck:
+    name: Vulnerability audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # check-latest prend le dernier correctif de la ligne Go déclarée dans
+      # go.mod : c'est ce qui fait apparaître l'écart quand le toolchain épinglé
+      # par le Dockerfile prend du retard.
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Run govulncheck
+        run: |
+          { go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -format sarif ./... || :; } | tee ./govulncheck.sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          sarif_file: ./govulncheck.sarif
+          category: govulncheck
+
+      # Le SARIF alimente l'onglet Security ; cette étape fait échouer le
+      # workflow pour que le cron hebdomadaire notifie au lieu de passer sous
+      # silence.
+      - name: Fail on findings
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...

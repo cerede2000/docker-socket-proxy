@@ -15,6 +15,11 @@ All notable changes are documented here. Release tags use semantic versioning.
 
 - A unix socket frontend: `PROXY_LISTEN_UNIX` / `--listen-unix` binds a socket to a single profile, so the socket path and its file permissions carry the client identity instead of its IP address. `PROXY_LISTEN=off` disables the TCP frontend entirely.
 
+### Security
+
+- A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.
+- Every GitHub Action is pinned by commit SHA rather than by a movable tag.
+
 ### Migration
 
 - Add `allow_inspect: true` to every existing profile that calls `GET /containers/{id}/json`.
