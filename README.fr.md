@@ -23,9 +23,11 @@ La branche `integration` publie uniquement le tag mutable `integration`. Elle ne
 
 ## Notes de mise à niveau
 
-La release `1.2.0` renforce plusieurs permissions et peut nécessiter une adaptation des profils. L'inspection d'un conteneur demande `allow_inspect: true` ; la création d'une session exec demande à la fois `exec: true` et `post: true` ; enfin, les profils à portée limitée ne peuvent plus effectuer d'écritures globales sur les images, volumes ou réseaux. Les options de profil CLI inconnues sont rejetées afin qu'une faute de frappe ne produise pas silencieusement une politique inattendue.
+Depuis la `1.2.0`, aucune adaptation de profil n'est nécessaire : la `1.3.0` ne fait qu'élargir ce qu'un profil `blacklist` ou doté de `container_rules` peut faire, et le frontend socket unix se choisit explicitement. Un détail de déploiement change en revanche : l'image est construite `FROM scratch` et n'a plus de `/etc/passwd`, un fichier compose doit donc désigner son utilisateur par ses identifiants numériques (`user: "65532:65532"`) ; un nom tel que `nonroot` ne se résout plus.
 
-Consultez la procédure de migration complète dans [CHANGELOG.md](CHANGELOG.md) avant de remplacer une image `1.1.2` ou antérieure, puis épinglez le tag immuable `1.2.0` plutôt que `latest`.
+Depuis une `1.1.2` ou antérieure, la `1.2.0` a renforcé plusieurs permissions et peut nécessiter une adaptation des profils. L'inspection d'un conteneur demande `allow_inspect: true`, et la création d'une session exec demande à la fois `exec: true` et `post: true`. Les options de profil CLI inconnues sont rejetées afin qu'une faute de frappe ne produise pas silencieusement une politique inattendue.
+
+Consultez la procédure de migration complète dans [CHANGELOG.md](CHANGELOG.md), puis épinglez le tag immuable `1.3.0` plutôt que `latest`.
 
 L'image publiée est analysée en continu par [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). Le rapport est lié ici plutôt que figé dans le README : son résultat suit les mises à jour des vulnérabilités et de l'image.
 

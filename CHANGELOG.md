@@ -2,7 +2,7 @@
 
 All notable changes are documented here. Release tags use semantic versioning.
 
-## Unreleased
+## 1.3.0 - 2026-09-25
 
 ### Added
 
@@ -11,18 +11,20 @@ All notable changes are documented here. Release tags use semantic versioning.
 
 ### Changed
 
-- The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532.
+- Global writes are now refused according to what the scope describes, instead of whenever any scope is set. An `allowlist` lists the profile's whole world, so `containers/create`, `containers/prune` and image, volume or non-targeted network writes stay denied. A `blacklist`, or a `container_rules` exception over `all`, covers everything but its named targets: those writes are allowed again, since refusing creation contradicted the deletion the same profile already permitted.
+- The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532. There is no `/etc/passwd`, so a compose file must name its user numerically (`user: "65532:65532"`); a name such as `nonroot` no longer resolves.
 - The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter. Go moves to 1.27.1.
 - Unit coverage rises from 46% to 83%; discovery, the event loop, profile reloading and the healthcheck were previously untested.
-
-### Changed
-
-- Global writes are now refused according to what the scope describes, instead of whenever any scope is set. An `allowlist` lists the profile's whole world, so `containers/create`, `containers/prune` and image, volume or non-targeted network writes stay denied. A `blacklist`, or a `container_rules` exception over `all`, covers everything but its named targets: those writes are allowed again, since refusing creation contradicted the deletion the same profile already permitted.
 
 ### Security
 
 - A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.
 - Every GitHub Action is pinned by commit SHA rather than by a movable tag.
+
+### Migration
+
+- Coming from `1.2.0`, no profile change is required: the scope change only widens what a `blacklist` or `container_rules` profile may do, and the unix socket frontend is opt-in. Replace a `user:` given by name with its numeric UID and GID.
+- Coming from `1.1.x` or older, follow the `1.2.0` migration notes below as well.
 
 ## 1.2.0 - 2026-08-24
 

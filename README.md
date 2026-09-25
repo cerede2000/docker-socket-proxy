@@ -23,9 +23,11 @@ The `integration` branch publishes only the mutable `integration` tag. It never 
 
 ## Upgrade notes
 
-Release `1.2.0` tightens several permissions and may require profile changes. Container inspection needs `allow_inspect: true`; creating exec sessions needs both `exec: true` and `post: true`; and scoped profiles cannot perform global image, volume, or network writes. Unknown CLI profile options are rejected so that a typo cannot silently produce an unintended policy.
+Coming from `1.2.0`, no profile change is required: `1.3.0` only widens what a `blacklist` or `container_rules` profile may do, and the unix socket frontend is opt-in. One deployment detail changed: the image is now built `FROM scratch` and has no `/etc/passwd`, so a compose file must give its user numerically (`user: "65532:65532"`); a name such as `nonroot` no longer resolves.
 
-Review the complete migration checklist in [CHANGELOG.md](CHANGELOG.md) before moving an existing deployment from `1.1.2` or an older image, then pin the immutable `1.2.0` tag rather than `latest`.
+Coming from `1.1.2` or older, `1.2.0` tightened several permissions and may require profile changes. Container inspection needs `allow_inspect: true`, and creating exec sessions needs both `exec: true` and `post: true`. Unknown CLI profile options are rejected so that a typo cannot silently produce an unintended policy.
+
+Review the complete migration checklist in [CHANGELOG.md](CHANGELOG.md), then pin the immutable `1.3.0` tag rather than `latest`.
 
 The published image is continuously analysed by [Docker Scout](https://scout.docker.com/reports/org/cerede2000/images/host/hub.docker.com/repo/cerede2000%2Fdocker-socket-proxy). The live report is linked rather than hard-coded here, so its result always reflects current image and vulnerability data.
 
