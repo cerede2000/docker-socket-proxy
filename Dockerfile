@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 
 ARG APP_VERSION="dev"
 ARG APP_GIT_SHA="unknown"
@@ -6,6 +6,10 @@ ARG TARGETOS
 ARG TARGETARCH
 
 ENV CGO_ENABLED=0
+
+# binutils fournit readelf, utilisé plus bas pour vérifier que le binaire est
+# bien statique. Sans cette garantie, une image scratch ne démarrerait pas.
+RUN apk add --no-cache binutils
 
 WORKDIR /src
 
@@ -16,18 +20,28 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=${APP_VERSION} -X main.gitSha=${APP_GIT_SHA}" \
     -o /out/docker-socket-proxy ./src
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
+# Un binaire lié dynamiquement porte une section .interp nommant son chargeur.
+# L'absence de cette section est la preuve qu'aucun interpréteur n'est requis,
+# et donc que l'image finale peut se passer de toute bibliothèque système.
+RUN test -z "$(readelf -x .interp /out/docker-socket-proxy 2>/dev/null)"
 
-COPY --from=build --chown=nonroot:nonroot /out/docker-socket-proxy /usr/local/bin/docker-socket-proxy
+FROM scratch
+
+# scratch ne définit aucune variable : les chemins absolus ci-dessous évitent
+# de dépendre d'un PATH hérité.
+COPY --from=build --chown=65532:65532 /out/docker-socket-proxy /usr/local/bin/docker-socket-proxy
 
 ENV DOCKER_SOCKET_PATH=/var/run/docker.sock \
-    PROXY_PORT=2375
+    PROXY_PORT=2375 \
+    PATH=/usr/local/bin
 
 EXPOSE 2375
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["docker-socket-proxy", "healthcheck"]
+  CMD ["/usr/local/bin/docker-socket-proxy", "healthcheck"]
 
-USER nonroot:nonroot
+# 65532 est l'UID nonroot conventionnel des images distroless. scratch n'a pas
+# de /etc/passwd : l'UID numérique suffit au moteur.
+USER 65532:65532
 
-ENTRYPOINT ["docker-socket-proxy"]
+ENTRYPOINT ["/usr/local/bin/docker-socket-proxy"]

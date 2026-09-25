@@ -15,7 +15,7 @@ cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges dans `distroless/static-debian13:nonroot`.
+La première référence est publiée sur [Docker Hub](https://hub.docker.com/r/cerede2000/docker-socket-proxy) ; la seconde sur GitHub Container Registry. Les deux images sont multi-architecture (`linux/amd64` et `linux/arm64`), construites avec Go et exécutées sans privilèges sous l'UID 65532 dans une image `scratch` qui ne contient que le binaire.
 
 `latest` suit `main`. Chaque release Git `vX.Y.Z` publie également les tags Docker immuables `X.Y.Z` et `X.Y` sur les deux registres.
 
@@ -412,7 +412,7 @@ client Docker -- HTTP privé --> docker-socket-proxy -- socket Unix --> dockerd
 
 Cette approche est la même que celle des proxies de référence Tecnativa et LinuxServer : le contrôle d'accès réseau et le filtrage d'API remplacent une terminaison TLS sur un port qui ne doit pas être publié. Si un besoin inter-hôtes apparaît, déployez un proxy local par hôte plutôt que d'étendre ce port : l'association client/profil de ce projet repose sur les réseaux Docker locaux.
 
-La runtime `distroless/static-debian13:nonroot` est adaptée à ce modèle : le binaire Go est compilé avec `CGO_ENABLED=0`, sans dépendance à `glibc`, OpenSSL ni magasin de CA. Ajouter des CA ne renforcerait pas cette configuration ; elles ne deviendraient nécessaires qu'avec une future fonctionnalité HTTPS sortante ou mTLS.
+Une image `scratch` est adaptée à ce modèle : le binaire Go est compilé avec `CGO_ENABLED=0`, sans dépendance à `glibc`, OpenSSL ni magasin de CA, et le build échoue s'il venait à réclamer un interpréteur dynamique. L'image n'embarque donc aucun paquet de distribution, ce qui ne laisse aucune couche de base à corriger. Ajouter des CA ne renforcerait pas cette configuration ; elles ne deviendraient nécessaires qu'avec une future fonctionnalité HTTPS sortante ou mTLS.
 
 ## Développement
 

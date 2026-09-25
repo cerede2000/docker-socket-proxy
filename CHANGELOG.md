@@ -20,6 +20,11 @@ All notable changes are documented here. Release tags use semantic versioning.
 - A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.
 - Every GitHub Action is pinned by commit SHA rather than by a movable tag.
 
+### Changed
+
+- The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532.
+- The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter.
+
 ### Migration
 
 - Add `allow_inspect: true` to every existing profile that calls `GET /containers/{id}/json`.

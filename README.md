@@ -15,7 +15,7 @@ cerede2000/docker-socket-proxy:latest
 ghcr.io/cerede2000/docker-socket-proxy:latest
 ```
 
-Docker Hub is the primary registry; GitHub Container Registry is also available. Both images support `linux/amd64` and `linux/arm64`, are built with Go, and run unprivileged on `distroless/static-debian13:nonroot`.
+Docker Hub is the primary registry; GitHub Container Registry is also available. Both images support `linux/amd64` and `linux/arm64`, are built with Go, and run unprivileged as UID 65532 on a `scratch` image containing nothing but the binary.
 
 `latest` follows `main`. A Git release `vX.Y.Z` additionally publishes immutable `X.Y.Z` and `X.Y` tags to both registries.
 
@@ -404,7 +404,7 @@ Docker client -- private HTTP --> docker-socket-proxy -- Unix socket --> dockerd
 
 This is the same model used by the Tecnativa and LinuxServer socket proxies: network isolation and API filtering replace TLS termination for a port that must never be published. If you need cross-host access, deploy a local proxy per host rather than extending this port; client/profile association relies on local Docker networks.
 
-`distroless/static-debian13:nonroot` fits this design. The Go binary is built with `CGO_ENABLED=0`, with no dependency on `glibc`, OpenSSL, or a CA store. Adding CA certificates would not strengthen this configuration; they would only become useful if a future feature introduced outgoing HTTPS or mTLS.
+A `scratch` image fits this design. The Go binary is built with `CGO_ENABLED=0`, with no dependency on `glibc`, OpenSSL, or a CA store, and the build fails if it ever gains a dynamic interpreter. The image therefore ships no distribution package at all, which leaves no base layer to patch. Adding CA certificates would not strengthen this configuration; they would only become useful if a future feature introduced outgoing HTTPS or mTLS.
 
 ## Operations
 
