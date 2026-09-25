@@ -419,7 +419,10 @@ Une image `scratch` est adaptée à ce modèle : le binaire Go est compilé avec
 ```bash
 go test -race ./...
 go vet ./...
+./e2e/run.sh
 ```
+
+`e2e/run.sh` exige un démon Docker joignable. Le script construit l'image, puis éprouve la découverte par label, la portée conteneur, la réécriture nom → ID, le filtrage des réponses et le frontend socket unix face à ce démon — c'est-à-dire tout ce qu'un test unitaire ne peut pas atteindre, parce que cela n'existe que dans le dialogue avec un vrai `dockerd`. Le journal du proxy est déposé dans `e2e/proxy.log` à la fin de la suite.
 
 ## Licence
 

@@ -415,7 +415,10 @@ The proxy logs profile discovery and denials. A client with no role, an unknown 
 ```bash
 go test -race ./...
 go vet ./...
+./e2e/run.sh
 ```
+
+`e2e/run.sh` needs a reachable Docker daemon. It builds the image, then exercises label discovery, container scope, name-to-ID rewriting, response filtering and the unix socket frontend against that daemon — the parts a unit test cannot reach, because they only exist in the conversation with a real `dockerd`. The proxy log is written to `e2e/proxy.log` when the suite ends.
 
 ## License
 

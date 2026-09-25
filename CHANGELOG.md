@@ -25,6 +25,10 @@ All notable changes are documented here. Release tags use semantic versioning.
 - The runtime image is now `scratch` instead of `distroless/static-debian13`: it carries the binary and nothing else, so no distribution package remains to patch. The process still runs as UID 65532.
 - The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter.
 
+### Added
+
+- An end-to-end suite (`e2e/run.sh`, also run in CI) exercises label discovery, container scope, name-to-ID rewriting, response filtering and the unix socket frontend against a real Docker daemon.
+
 ### Migration
 
 - Add `allow_inspect: true` to every existing profile that calls `GET /containers/{id}/json`.
