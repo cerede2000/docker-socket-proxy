@@ -76,14 +76,26 @@ func proxyHandler(cfg *ProxyConfig, resolverClient *http.Client, proxy *httputil
 		path := r.URL.Path
 		method := r.Method
 
-		// Health local : accès direct à /version depuis localhost
-		if isLocalIP(host) && isVersionPath(path) {
+		// Une socket unix dédiée impose son profil : son chemin et ses
+		// permissions portent l'identité du client, et aucune requête ne peut
+		// la contourner.
+		boundRole, viaUnixSocket := boundRoleFromContext(r.Context())
+		if viaUnixSocket {
+			host = "unix"
+		}
+
+		// Health local : accès direct à /version depuis localhost, réservé au
+		// frontend TCP. Sur une socket dédiée, /version reste soumis au profil.
+		if !viaUnixSocket && isLocalIP(host) && isVersionPath(path) {
 			logger.Printf("[health] local check ip=%q method=%q path=%q", host, method, path)
 			proxy.ServeHTTP(w, r)
 			return
 		}
 
-		role := cfg.GetRole(host)
+		role := boundRole
+		if !viaUnixSocket {
+			role = cfg.GetRole(host)
+		}
 		if role == "" {
 			logger.Printf("[deny] ip=%q role=<none> method=%q path=%q", host, method, path)
 			http.Error(w, "Forbidden", http.StatusForbidden)

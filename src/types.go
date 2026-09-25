@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,12 @@ type ProxyConfig struct {
 	DiscoverInterval time.Duration
 	ProfilesFile     string
 	DebounceDelay    time.Duration // Délai de debouncing pour les events
+
+	// UnixListeners déclare des sockets unix dédiées, chacune liée à un profil.
+	// Le chemin de la socket porte l'identité du client, ce qui rend inutile la
+	// résolution IP → rôle et supprime toute exposition réseau.
+	UnixListeners  []UnixListenerConfig
+	UnixSocketMode os.FileMode
 
 	baseServices map[string]*ServiceConfig // défini par les args (CLI)
 

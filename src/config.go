@@ -329,8 +329,19 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 		socketPath = "/var/run/docker.sock"
 	}
 
+	unixListeners, err := parseUnixListeners(os.Getenv("PROXY_LISTEN_UNIX"))
+	if err != nil {
+		return nil, err
+	}
+	socketMode, err := parseSocketMode(os.Getenv("PROXY_LISTEN_UNIX_MODE"))
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &ProxyConfig{
 		Listen:            listen,
+		UnixListeners:     unixListeners,
+		UnixSocketMode:    socketMode,
 		SocketPath:        socketPath,
 		DiscoverInterval:  discoverIntervalFromEnv(logger),
 		DebounceDelay:     debounceDelayFromEnv(logger),
@@ -344,6 +355,10 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 		execToContainer:   make(map[string]dockerExecCacheEntry),
 	}
 
+	// Un --listen-unix en ligne de commande remplace la liste issue de
+	// l'environnement au lieu de s'y ajouter, comme les autres options globales.
+	unixListenersFromCLI := false
+
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "--") {
 			continue
@@ -353,6 +368,28 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 		// Options globales
 		if strings.HasPrefix(opt, "listen=") {
 			cfg.Listen = strings.TrimPrefix(opt, "listen=")
+			continue
+		}
+		// Testé avant les profils : un chemin de socket contient souvent un
+		// point, qui le ferait passer pour "--<profil>.<option>".
+		if strings.HasPrefix(opt, "listen-unix-mode=") {
+			mode, err := parseSocketMode(strings.TrimPrefix(opt, "listen-unix-mode="))
+			if err != nil {
+				return nil, err
+			}
+			cfg.UnixSocketMode = mode
+			continue
+		}
+		if strings.HasPrefix(opt, "listen-unix=") {
+			entries, err := parseUnixListeners(strings.TrimPrefix(opt, "listen-unix="))
+			if err != nil {
+				return nil, err
+			}
+			if !unixListenersFromCLI {
+				cfg.UnixListeners = nil
+				unixListenersFromCLI = true
+			}
+			cfg.UnixListeners = append(cfg.UnixListeners, entries...)
 			continue
 		}
 		if strings.HasPrefix(opt, "socket=") {
@@ -409,6 +446,10 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 		}
 	}
 
+	if err := validateUnixListeners(cfg); err != nil {
+		return nil, err
+	}
+
 	cfg.services = cloneServices(cfg.baseServices)
 	for name, svc := range cfg.services {
 		if err := validateContainerScope(svc); err != nil {
@@ -422,6 +463,9 @@ func parseConfig(args []string, logger *log.Logger) (*ProxyConfig, error) {
 
 	logger.Printf("[config] listen=%s socket=%s discover=%s debounce=%s profilesFile=%s",
 		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
+	for _, entry := range cfg.UnixListeners {
+		logger.Printf("[config] listen-unix path=%q role=%q mode=%#o", entry.Path, entry.Role, cfg.UnixSocketMode)
+	}
 
 	if len(cfg.services) == 0 {
 		logger.Printf("[config] WARNING: aucun profil défini (pas de --home / --portainer / etc.)")

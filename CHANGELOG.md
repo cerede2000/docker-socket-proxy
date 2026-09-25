@@ -11,6 +11,10 @@ All notable changes are documented here. Release tags use semantic versioning.
 - Scoped profiles can no longer perform global image, volume, or network writes because those operations cannot be tied safely to an authorized target container.
 - Uploading an archive with `PUT /containers/{id}/archive` requires both `allow_archive: true` and `post: true`.
 
+### Added
+
+- A unix socket frontend: `PROXY_LISTEN_UNIX` / `--listen-unix` binds a socket to a single profile, so the socket path and its file permissions carry the client identity instead of its IP address. `PROXY_LISTEN=off` disables the TCP frontend entirely.
+
 ### Migration
 
 - Add `allow_inspect: true` to every existing profile that calls `GET /containers/{id}/json`.

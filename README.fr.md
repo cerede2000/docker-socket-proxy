@@ -177,14 +177,38 @@ traefik-manager:
 | --- | --- | --- |
 | `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Chemin du socket Docker à joindre |
 | `PROXY_PORT` | `2375` | Port d'écoute et port du healthcheck intégré |
-| `PROXY_LISTEN` | — | Adresse d'écoute complète ; prioritaire sur `PROXY_PORT` |
+| `PROXY_LISTEN` | — | Adresse d'écoute complète ; prioritaire sur `PROXY_PORT`. La valeur `off` désactive complètement le frontend TCP |
+| `PROXY_LISTEN_UNIX` | — | Sockets unix dédiées, `<chemin>:<rôle>` séparés par des virgules ou des sauts de ligne |
+| `PROXY_LISTEN_UNIX_MODE` | `0660` | Permissions octales appliquées à chaque socket unix |
 | `SOCKETPROXY_PROFILE_FILE` | `/config/profiles.yml` | Fichier YAML des profils |
 | `DISCOVER_INTERVAL` | `30s` | Période de redécouverte des conteneurs ; durée Go (`15s`) ou nombre de secondes (`15`) |
 | `EVENT_DEBOUNCE_DELAY` | `100ms` | Délai de regroupement des événements Docker ; durée Go ou nombre de millisecondes |
 
-Les arguments suivants sont disponibles et prioritaires sur les variables correspondantes : `--listen`, `--socket`, `--profiles`, `--discover-interval` et `--debounce-delay`.
+Les arguments suivants sont disponibles et prioritaires sur les variables correspondantes : `--listen`, `--listen-unix` (répétable), `--listen-unix-mode`, `--socket`, `--profiles`, `--discover-interval` et `--debounce-delay`.
 
-Le healthcheck appelle `http://127.0.0.1:$PROXY_PORT/version`. Si `--listen` ou `PROXY_LISTEN` utilise un autre port, renseignez `PROXY_PORT` avec ce même port.
+Le healthcheck appelle `http://127.0.0.1:$PROXY_PORT/version`. Si `--listen` ou `PROXY_LISTEN` utilise un autre port, renseignez `PROXY_PORT` avec ce même port. Il a besoin du frontend TCP : avec `PROXY_LISTEN=off`, remplacez-le par une sonde de votre choix.
+
+### Frontend socket unix dédié
+
+Une socket unix peut être liée à un profil unique. Son chemin porte alors l'identité du client, et les permissions du système de fichiers remplacent la résolution par adresse IP :
+
+```yaml
+    environment:
+      PROXY_LISTEN: "off"
+      PROXY_LISTEN_UNIX: "/run/socketproxy/traefik.sock:traefik"
+    volumes:
+      - ./profiles.yml:/config/profiles.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - socketproxy-run:/run/socketproxy
+```
+
+Le consommateur monte le même volume et pointe `DOCKER_HOST` sur `unix:///run/socketproxy/traefik.sock`. Toute requête arrivant sur cette socket reçoit le profil `traefik`, quoi qu'envoie le client : aucun en-tête, aucune adresse et aucun champ de la requête ne peut le changer.
+
+Ce mode supprime toute exposition réseau. Il supprime aussi la seule faiblesse de l'identification par IP : Docker réattribue les adresses, une IP cliente ne vaut donc que tant que le conteneur qui la porte existe. Une socket n'a pas cette fenêtre.
+
+Les deux frontends peuvent coexister : le TCP pour les services découverts par label, une socket dédiée pour ceux qui méritent une frontière plus stricte. `PROXY_LISTEN=off` est refusé si aucune socket n'est déclarée, afin que le proxy ne démarre jamais sourd.
+
+Les sockets sont créées sans aucune permission, puis passées au mode `PROXY_LISTEN_UNIX_MODE` : aucune fenêtre ne laisse s'appliquer les permissions par défaut. Le consommateur doit partager l'UID ou le GID du proxy. Une socket laissée par un arrêt brutal est remplacée au démarrage ; tout autre type de fichier à cet emplacement est une erreur, jamais une suppression.
 
 ### Options de ligne de commande par profil
 

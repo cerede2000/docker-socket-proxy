@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -266,14 +267,45 @@ func TestContainerExecRequiresExecAndPost(t *testing.T) {
 	}
 }
 
-func TestServeUntilShutdownReturnsFatalListenError(t *testing.T) {
+func TestBuildListenersReportsFatalListenError(t *testing.T) {
+	cfg := &ProxyConfig{Listen: "invalid listen address"}
+	if _, err := buildListeners(cfg, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("invalid listen address was reported as a successful bind")
+	}
+}
+
+func TestServeUntilShutdownReturnsFatalServeError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Servir un listener déjà fermé force Serve à rendre une erreur qui n'est
+	// pas ErrServerClosed : c'est le chemin fatal que la fonction doit remonter.
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	srv := &http.Server{Addr: "invalid listen address"}
+	bound := []boundListener{{listener: listener}}
 
-	err := serveUntilShutdown(ctx, stop, srv, log.New(io.Discard, "", 0))
-	if err == nil {
-		t.Fatal("fatal listen error was reported as a clean shutdown")
+	if err := serveUntilShutdown(ctx, stop, bound, http.NotFoundHandler(), log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("fatal serve error was reported as a clean shutdown")
+	}
+}
+
+func TestServeUntilShutdownReturnsCleanlyOnContextCancel(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+
+	if err := serveUntilShutdown(ctx, stop, []boundListener{{listener: listener}}, http.NotFoundHandler(), log.New(io.Discard, "", 0)); err != nil {
+		t.Fatalf("clean shutdown reported an error: %v", err)
 	}
 }
 

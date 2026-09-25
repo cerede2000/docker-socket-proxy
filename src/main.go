@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -100,33 +101,56 @@ func main() {
 
 	handler := proxyHandler(cfg, discoveryClient, proxy, logger)
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		// WriteTimeout doit être 0 pour supporter les connexions longues comme /events
-		// Traefik et autres clients maintiennent /events ouvert indéfiniment
-		WriteTimeout:   0,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1 MB
+	listeners, err := buildListeners(cfg, logger)
+	if err != nil {
+		logger.Printf("[main] cannot open listeners: %v", err)
+		os.Exit(1)
 	}
 
-	logger.Printf("[main] listening on %s, docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
-		cfg.Listen, cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
+	logger.Printf("[main] docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
+		cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)
 
-	if err := serveUntilShutdown(ctx, stop, srv, logger); err != nil {
+	if err := serveUntilShutdown(ctx, stop, listeners, handler, logger); err != nil {
 		logger.Printf("[main] fatal server error: %v", err)
 		os.Exit(1)
 	}
 }
 
-func serveUntilShutdown(ctx context.Context, stop context.CancelFunc, srv *http.Server, logger *log.Logger) error {
-	serverErrors := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErrors <- err
+// newProxyServer applique les mêmes réglages à chaque frontend. WriteTimeout
+// doit rester à 0 pour supporter les connexions longues comme /events, que
+// Traefik et consorts maintiennent ouvertes indéfiniment.
+func newProxyServer(handler http.Handler, logger *log.Logger) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ErrorLog:          logger,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+}
+
+// serveUntilShutdown sert chaque frontend avec son propre serveur, car le
+// handler diffère : une socket unix impose son profil, le frontend TCP le
+// déduit de l'adresse du client.
+func serveUntilShutdown(ctx context.Context, stop context.CancelFunc, listeners []boundListener, handler http.Handler, logger *log.Logger) error {
+	servers := make([]*http.Server, 0, len(listeners))
+	serverErrors := make(chan error, len(listeners))
+
+	for _, bound := range listeners {
+		frontendHandler := handler
+		if bound.role != "" {
+			frontendHandler = withBoundRole(handler, bound.role)
 		}
-	}()
+		srv := newProxyServer(frontendHandler, logger)
+		servers = append(servers, srv)
+
+		go func(srv *http.Server, listener net.Listener) {
+			if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+				serverErrors <- err
+			}
+		}(srv, bound.listener)
+	}
 
 	var serverErr error
 	select {
@@ -140,8 +164,10 @@ func serveUntilShutdown(ctx context.Context, stop context.CancelFunc, srv *http.
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && serverErr == nil {
-		return err
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil && serverErr == nil {
+			serverErr = err
+		}
 	}
 	return serverErr
 }
