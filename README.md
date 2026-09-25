@@ -209,6 +209,8 @@ Both frontends can run together: keep TCP for the services discovered by label, 
 
 Sockets are created with no permission at all, then set to `PROXY_LISTEN_UNIX_MODE`, which leaves no window during which the default mode would apply. The consumer must share the proxy UID or GID. A socket left behind by a crash is replaced at startup; any other kind of file at that path is an error, never a deletion.
 
+Place the socket in a directory only the proxy and its consumer can write to, such as a dedicated volume. A process able to create files there could substitute the socket path between its creation and the moment its permissions are set.
+
 ### Profile options on the command line
 
 Profiles can also be defined in the container command. Use `--<profile>.<option>=<value>` or `--proxy-<profile>.<option>=<value>`.

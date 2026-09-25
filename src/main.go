@@ -84,6 +84,16 @@ func main() {
 		logger.Printf("[main] WARNING: initial discovery failed after %d attempts - starting anyway", maxRetries)
 	}
 
+	// Les listeners sont ouverts AVANT les boucles de fond, et cet ordre doit
+	// être conservé : créer une socket unix passe par umask, qui est global au
+	// processus. Tant que rien d'autre ne tourne, la fenêtre où le masque est
+	// modifié ne peut atteindre aucune autre création de fichier.
+	listeners, err := buildListeners(cfg, logger)
+	if err != nil {
+		logger.Printf("[main] cannot open listeners: %v", err)
+		os.Exit(1)
+	}
+
 	// Boucles de fond :
 	// - découverte périodique (avec timeout)
 	// - watcher du fichier de profiles
@@ -100,12 +110,6 @@ func main() {
 	proxy.ModifyResponse = scopeResponseFilter(cfg)
 
 	handler := proxyHandler(cfg, discoveryClient, proxy, logger)
-
-	listeners, err := buildListeners(cfg, logger)
-	if err != nil {
-		logger.Printf("[main] cannot open listeners: %v", err)
-		os.Exit(1)
-	}
 
 	logger.Printf("[main] docker socket=%s, discover every %s, debounce=%s, profilesFile=%s",
 		cfg.SocketPath, cfg.DiscoverInterval, cfg.DebounceDelay, cfg.ProfilesFile)

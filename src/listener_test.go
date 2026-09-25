@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -544,5 +545,63 @@ func TestParseConfigRejectsInvalidUnixListener(t *testing.T) {
 				t.Fatalf("invalid configuration %v was accepted", args)
 			}
 		})
+	}
+}
+
+// readUmask lit le masque courant sans le modifier durablement.
+func readUmask() int {
+	current := syscall.Umask(0)
+	syscall.Umask(current)
+	return current
+}
+
+// Le mode final est exactement celui demandé, quel que soit le umask du
+// processus. Ce test ne prouve pas l'utilité du umask lui-même : le chmod
+// suffirait à obtenir ce mode. Le umask couvre la fenêtre entre la création de
+// la socket et le chmod, qui n'est pas observable par un test déterministe.
+func TestListenUnixAppliesModeRegardlessOfProcessUmask(t *testing.T) {
+	previous := syscall.Umask(0o077)
+	defer syscall.Umask(previous)
+
+	dir := tempSocketDir(t)
+	path := filepath.Join(dir, "s.sock")
+
+	listener, err := listenUnix(path, 0o666)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o666 {
+		t.Fatalf("socket mode = %#o, want %#o: the process umask leaked into the socket", got, 0o666)
+	}
+}
+
+// Le masque est global au processus : listenUnix doit le rendre intact, y
+// compris quand la création échoue.
+func TestListenUnixRestoresProcessUmask(t *testing.T) {
+	previous := syscall.Umask(0o022)
+	defer syscall.Umask(previous)
+
+	dir := tempSocketDir(t)
+
+	listener, err := listenUnix(filepath.Join(dir, "s.sock"), 0o660)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.Close()
+	if got := readUmask(); got != 0o022 {
+		t.Fatalf("umask after a successful listen = %#o, want %#o", got, 0o022)
+	}
+
+	if _, err := listenUnix(filepath.Join(dir, "absent", "s.sock"), 0o660); err == nil {
+		t.Fatal("a listener on a missing directory was accepted")
+	}
+	if got := readUmask(); got != 0o022 {
+		t.Fatalf("umask after a failed listen = %#o, want %#o", got, 0o022)
 	}
 }

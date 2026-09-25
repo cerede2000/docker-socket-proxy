@@ -129,8 +129,15 @@ func removeStaleSocket(path string) error {
 }
 
 // listenUnix crée la socket sans aucune permission, puis applique le mode
-// demandé. Passer par umask ferme la fenêtre pendant laquelle la socket serait
-// joignable avec les permissions par défaut du processus.
+// demandé.
+//
+// Le chmod suffirait à obtenir le mode final ; le umask sert à la fenêtre qui
+// le précède. Sans lui, la socket existerait un instant avec les permissions
+// par défaut du processus — 0755 pour un umask courant de 0022 — et serait
+// joignable par n'importe qui pendant ce laps de temps.
+//
+// Le masque étant global au processus, cette fonction doit être appelée avant
+// le démarrage des boucles de fond ; main s'en charge.
 func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 	if err := removeStaleSocket(path); err != nil {
 		return nil, err

@@ -210,6 +210,8 @@ Les deux frontends peuvent coexister : le TCP pour les services découverts par 
 
 Les sockets sont créées sans aucune permission, puis passées au mode `PROXY_LISTEN_UNIX_MODE` : aucune fenêtre ne laisse s'appliquer les permissions par défaut. Le consommateur doit partager l'UID ou le GID du proxy. Une socket laissée par un arrêt brutal est remplacée au démarrage ; tout autre type de fichier à cet emplacement est une erreur, jamais une suppression.
 
+Placez la socket dans un répertoire où seuls le proxy et son consommateur peuvent écrire, par exemple un volume dédié. Un processus capable d'y créer des fichiers pourrait substituer le chemin de la socket entre sa création et l'application de ses permissions.
+
 ### Options de ligne de commande par profil
 
 Les profils peuvent aussi être définis dans la commande du conteneur. Le format est `--<profil>.<option>=<valeur>` ou `--proxy-<profil>.<option>=<valeur>`.
