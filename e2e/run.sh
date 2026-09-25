@@ -175,6 +175,19 @@ watcher:
   blocked_containers:
     - ${TARGET_HIDDEN}
 
+# Portée ouverte : tout sauf la cible masquée, mais avec les écritures globales.
+# C'est le cas qu'une allowlist ne permet pas.
+manager:
+  ping: true
+  version: true
+  containers: true
+  images: true
+  allow_inspect: true
+  post: true
+  container_scope: blacklist
+  blocked_containers:
+    - ${TARGET_HIDDEN}
+
 # Profil lié à la socket unix dédiée.
 probe:
   ping: true
@@ -209,7 +222,7 @@ wait_for_proxy
 info "proxy démarré"
 
 log "Clients et cibles"
-for role in reader operator watcher inconnu "" ; do
+for role in reader operator watcher manager inconnu "" ; do
 	start_client "${role}"
 done
 
@@ -258,8 +271,24 @@ expect_status 200 "$(curl_tcp operator GET "/containers/${ALLOWED_ID:0:12}/json"
 HIDDEN_ID="$(docker inspect --format '{{.Id}}' "${TARGET_HIDDEN}")"
 expect_status 403 "$(curl_tcp operator GET "/containers/${HIDDEN_ID}/json")" "cible hors portée refusée même par son ID"
 
-expect_status 403 "$(curl_tcp operator POST '/containers/create?name=escapade')" "création globale refusée pour un profil scopé"
-expect_status 403 "$(curl_tcp operator POST /containers/prune)" "prune global refusé pour un profil scopé"
+expect_status 403 "$(curl_tcp operator POST '/containers/create?name=escapade')" "allowlist : création globale refusée"
+expect_status 403 "$(curl_tcp operator POST /containers/prune)" "allowlist : prune global refusé"
+
+log "Portée ouverte : les écritures globales restent permises"
+
+# Une blacklist décrit « tout sauf ces exceptions » : la création reste dans le
+# monde du client, qui peut déjà supprimer. Le proxy ne doit plus la refuser.
+CREATED="${RUN_ID}-created"
+CREATE_BODY="{\"Image\":\"${CLIENT_IMAGE}\",\"Cmd\":[\"sleep\",\"5\"]}"
+CREATE_CODE="$(docker exec "$(client_name manager)" \
+	curl -s -o /dev/null -w '%{http_code}' -X POST \
+	-H 'Content-Type: application/json' -d "${CREATE_BODY}" \
+	"http://${PROXY}:2375/containers/create?name=${CREATED}" 2>/dev/null || echo 000)"
+expect_status 201 "${CREATE_CODE}" "blacklist : création de conteneur acceptée"
+docker rm -f "${CREATED}" >/dev/null 2>&1 || true
+
+expect_status 403 "$(curl_tcp manager GET "/containers/${TARGET_HIDDEN}/json")" "blacklist : la cible masquée reste inaccessible"
+expect_status 200 "$(curl_tcp manager GET "/containers/${TARGET_ALLOWED}/json")" "blacklist : les autres cibles restent accessibles"
 
 # --------------------------------------------------------------------------
 # Filtrage des réponses : ce que le modèle par règles de chemin ne peut pas faire

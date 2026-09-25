@@ -15,6 +15,10 @@ All notable changes are documented here. Release tags use semantic versioning.
 - The build cross-compiles instead of emulating the target architecture, and fails if the binary ever gains a dynamic interpreter. Go moves to 1.27.1.
 - Unit coverage rises from 46% to 83%; discovery, the event loop, profile reloading and the healthcheck were previously untested.
 
+### Changed
+
+- Global writes are now refused according to what the scope describes, instead of whenever any scope is set. An `allowlist` lists the profile's whole world, so `containers/create`, `containers/prune` and image, volume or non-targeted network writes stay denied. A `blacklist`, or a `container_rules` exception over `all`, covers everything but its named targets: those writes are allowed again, since refusing creation contradicted the deletion the same profile already permitted.
+
 ### Security
 
 - A scheduled `Security` workflow runs CodeQL and `govulncheck` weekly, so a vulnerability published against unchanged code is reported instead of waiting for the next push.

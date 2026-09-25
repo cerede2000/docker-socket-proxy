@@ -312,7 +312,18 @@ Les noms sont les noms Docker sans le préfixe `/`. Les règles s'appliquent aux
 
 ### Limites de la portée
 
-La portée conteneur s'applique uniquement lorsqu'une requête Docker peut être rattachée à un conteneur. Pour un profil limité, les opérations globales sur les conteneurs (`create`, `prune`) et les écritures destructrices sur les images, volumes ou réseaux non ciblés sont refusées. Les lectures des familles globales `images`, `volumes` et `networks` ne sont pas filtrées par conteneur. Évitez d'accorder ces familles avec `post: true` sauf si le client administre réellement tout l'hôte.
+La portée conteneur s'applique uniquement lorsqu'une requête Docker peut être rattachée à un conteneur. Elle répond à la question *sur quelles cibles*, jamais *avec quels privilèges* : c'est `post` qui tranche ce second point.
+
+Les opérations globales sont traitées selon ce que la portée décrit :
+
+| Portée | Écritures globales (`containers/create`, `containers/prune`, écritures images, volumes et réseaux non ciblés) |
+| --- | --- |
+| `allowlist` | **refusées** — le profil énumère tout son monde, rien de créé ensuite ne lui appartient |
+| `blacklist`, ou `container_rules` sur `all` | autorisées — le profil couvre tout sauf ses exceptions nommées, et un conteneur créé ensuite s'y trouve |
+
+Refuser la création à un profil `blacklist` contredirait la suppression qu'il permet déjà. Une règle `readonly` nominative retire une cible ; elle ne transforme pas le profil en monde fermé.
+
+Les lectures des familles globales `images`, `volumes` et `networks` ne sont jamais filtrées par conteneur. Évitez d'accorder ces familles avec `post: true` sauf si le client administre réellement tout l'hôte : un conteneur créé avec des montages de l'hôte échappe à toute portée, et seul `post` s'y oppose.
 
 ### Accès large : `all`
 

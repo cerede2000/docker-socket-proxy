@@ -192,6 +192,23 @@ func cloneContainerRules(in map[string]ContainerAccess) map[string]ContainerAcce
 	return out
 }
 
+// HasClosedContainerSet distingue les deux familles de portée, qui n'appellent
+// pas les mêmes refus.
+//
+// Une allowlist énumère le monde du client : tout objet créé ensuite est hors
+// de cette liste, donc les opérations globales — créer un conteneur, écrire sur
+// les images, les volumes ou les réseaux — n'y ont pas de cible légitime.
+//
+// Une blacklist, ou une règle nominative posée sur une portée « all », décrit
+// au contraire « tout sauf ces exceptions ». Une création y reste dans le
+// périmètre du client, et la lui refuser serait incohérent avec la suppression,
+// qu'elle autorise déjà. Ce qui borne les privilèges d'une telle création est
+// `post`, pas la portée : la portée répond à « sur quelles cibles », jamais à
+// « avec quels privilèges ».
+func (s *ServiceConfig) HasClosedContainerSet() bool {
+	return strings.ToLower(strings.TrimSpace(s.ContainerScope)) == "allowlist"
+}
+
 func (s *ServiceConfig) HasContainerScope() bool {
 	return (strings.ToLower(s.ContainerScope) != "" && strings.ToLower(s.ContainerScope) != "all") || len(s.ContainerRules) > 0
 }

@@ -311,7 +311,18 @@ Names are Docker container names without the `/` prefix. Scope rules apply to li
 
 ### Scope limits
 
-Container scope applies only where a Docker request can be tied to a container. For a scoped profile, global container operations (`create`, `prune`) and destructive image, volume, or non-targeted network writes are denied. Read access to the `images`, `volumes`, and global `networks` families is not filtered per container. Avoid granting these families together with `post: true` unless the client genuinely administers the whole host.
+Container scope applies only where a Docker request can be tied to a container. It answers *which targets*, never *with which privileges* — that is what `post` decides.
+
+Global operations are treated according to what the scope describes:
+
+| Scope | Global writes (`containers/create`, `containers/prune`, image, volume and non-targeted network writes) |
+| --- | --- |
+| `allowlist` | **denied** — the profile lists its whole world, so nothing created afterwards belongs to it |
+| `blacklist`, or `container_rules` over `all` | allowed — the profile covers everything but its named exceptions, and a container created later falls inside it |
+
+Denying creation to a `blacklist` profile would contradict the deletion it already permits. A named `readonly` rule removes one target; it does not turn the profile into a closed world.
+
+Read access to the `images`, `volumes`, and global `networks` families is never filtered per container. Avoid granting these families together with `post: true` unless the client genuinely administers the whole host: a container created with host bind mounts escapes any scope, and only `post` stands in its way.
 
 ### Broad access: `all`
 

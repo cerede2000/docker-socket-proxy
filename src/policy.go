@@ -426,8 +426,9 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 		return nil, nil
 	}
 	isWrite := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
-	if isWrite && (feature == "images" || feature == "volumes") {
-		return nil, fmt.Errorf("global %s write is denied for scoped profiles", feature)
+	closedWorld := service.HasClosedContainerSet()
+	if closedWorld && isWrite && (feature == "images" || feature == "volumes") {
+		return nil, fmt.Errorf("global %s write is denied for an allowlist profile", feature)
 	}
 
 	switch feature {
@@ -447,7 +448,12 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 			return &responseFilterContext{service: service, kind: filterContainerList}, nil
 		}
 		if isContainerGlobalOperation(r.URL.Path) {
-			return nil, fmt.Errorf("global container operation is denied for scoped profiles")
+			if closedWorld {
+				return nil, fmt.Errorf("global container operation is denied for an allowlist profile")
+			}
+			// Portée ouverte : un conteneur créé ensuite appartient au monde du
+			// client, puisque seules les exceptions nommées en sont exclues.
+			return nil, nil
 		}
 		return nil, fmt.Errorf("container operation has no enforceable target")
 	case "exec":
@@ -480,8 +486,8 @@ func enforceContainerScope(ctx context.Context, cfg *ProxyConfig, client *http.C
 			if err := requireWritableContainer(access, meta); err != nil {
 				return nil, err
 			}
-		} else if isWrite {
-			return nil, fmt.Errorf("global network write is denied for scoped profiles")
+		} else if isWrite && closedWorld {
+			return nil, fmt.Errorf("global network write is denied for an allowlist profile")
 		}
 	case "commit":
 		if ref := r.URL.Query().Get("container"); ref != "" {

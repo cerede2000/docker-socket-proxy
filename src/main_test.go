@@ -718,18 +718,78 @@ func TestEnforceContainerScopeRejectsBlacklistedAndGlobalOperations(t *testing.T
 		AllowedContainers: map[string]struct{}{},
 		BlockedContainers: map[string]struct{}{"docker-socket-proxy": {}},
 	}
-	for _, path := range []string{"/containers/docker-socket-proxy/stop", "/containers/prune"} {
+	req, err := http.NewRequest(http.MethodPost, "http://proxy/containers/docker-socket-proxy/stop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err == nil {
+		t.Fatal("an operation on a blocked container was unexpectedly allowed")
+	}
+
+	// Une blacklist décrit « tout sauf ces exceptions » : un conteneur créé
+	// ensuite appartient au monde du client, et le profil peut déjà en
+	// supprimer. Lui refuser la création serait incohérent.
+	for _, path := range []string{"/containers/create", "/containers/prune"} {
+		global, err := http.NewRequest(http.MethodPost, "http://proxy"+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", global); err != nil {
+			t.Errorf("a blacklist profile was denied %s: %v", path, err)
+		}
+	}
+}
+
+// Une allowlist énumère le monde du client : rien de ce qui est créé ensuite
+// n'y figure, donc les opérations globales n'ont pas de cible légitime.
+func TestAllowlistProfilesRejectGlobalContainerOperations(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	service := &ServiceConfig{
+		ContainerScope:    "allowlist",
+		AllowedContainers: map[string]struct{}{"traefik": {}},
+	}
+	for _, path := range []string{"/containers/create", "/containers/prune"} {
 		req, err := http.NewRequest(http.MethodPost, "http://proxy"+path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, "containers", req); err == nil {
-			t.Fatalf("scoped request %s was unexpectedly allowed", path)
+			t.Errorf("an allowlist profile was allowed %s", path)
 		}
 	}
 }
 
-func TestScopedProfilesRejectGlobalResourceWrites(t *testing.T) {
+// Une règle nominative posée sur une portée « all » n'enferme pas le client :
+// elle retire une cible. Les écritures globales doivent rester ouvertes.
+func TestContainerRulesOnOpenScopeKeepGlobalWrites(t *testing.T) {
+	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
+	service := &ServiceConfig{
+		ContainerScope: "all",
+		ContainerRules: map[string]ContainerAccess{"dockman": containerAccessReadOnly},
+	}
+	if !service.HasContainerScope() {
+		t.Fatal("a named rule must still activate the scope machinery")
+	}
+	if service.HasClosedContainerSet() {
+		t.Fatal("a named rule must not turn the profile into a closed world")
+	}
+	for _, tc := range []struct {
+		feature, method, path string
+	}{
+		{"containers", http.MethodPost, "/containers/create"},
+		{"images", http.MethodPost, "/images/create"},
+		{"images", http.MethodDelete, "/images/alpine"},
+		{"volumes", http.MethodPost, "/volumes/create"},
+		{"networks", http.MethodDelete, "/networks/internal"},
+	} {
+		req := httptest.NewRequest(tc.method, "http://proxy"+tc.path, nil)
+		if _, err := enforceContainerScope(context.Background(), cfg, nil, service, tc.feature, req); err != nil {
+			t.Errorf("a named-rule profile was denied %s %s: %v", tc.method, tc.path, err)
+		}
+	}
+}
+
+func TestAllowlistProfilesRejectGlobalResourceWrites(t *testing.T) {
 	cfg := &ProxyConfig{execToContainer: make(map[string]dockerExecCacheEntry)}
 	service := &ServiceConfig{ContainerScope: "allowlist", AllowedContainers: map[string]struct{}{"traefik": {}}}
 	for _, tc := range []struct {
