@@ -2,6 +2,17 @@
 
 All notable changes are documented here. Release tags use semantic versioning.
 
+## 1.3.1 - 2026-10-15
+
+### Security
+
+- Go moves to 1.27.2, which closes the thirteen standard library advisories published on 2026-10-08. Nine of them are reachable from this code: five in the HTTP/2 server and transport (`GO-2026-6603`, `GO-2026-6610`, `GO-2026-6611`, `GO-2026-6612`, `GO-2026-6617`), two connection desynchronizations around `CONNECT` in the HTTP/1 server and client (`GO-2026-6613`, `GO-2026-6605`), a memory limit bypass when parsing MIME headers (`GO-2026-6608`) and a malformed ECH extension reference in `crypto/tls` (`GO-2026-6607`). The two desynchronizations carry the most weight here: a proxy stands between a client and the daemon, which is the position where a desynchronized connection becomes request smuggling.
+- The vulnerability audit now runs with the Go toolchain the Dockerfile pins, instead of the latest patch of the line declared in `go.mod`. Reading `check-latest` made the gate scan a toolchain that was never shipped, so it reported a clean image while the published one still carried 1.27.1; the advisories were surfaced by the registry rather than by the audit.
+
+### Changed
+
+- Staticcheck moves to 2026.2.2, the first release that reads the export data format of Go 1.27.2.
+
 ## 1.3.0 - 2026-09-25
 
 ### Added

@@ -62,18 +62,34 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    # Sans ce verrou, go remplacerait le toolchain extrait du Dockerfile dès
+    # que go.mod en réclame un plus récent, et l'audit retomberait sur le
+    # dernier correctif disponible.
+    env:
+      GOTOOLCHAIN: local
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # check-latest prend le dernier correctif de la ligne Go déclarée dans
-      # go.mod : c'est ce qui fait apparaître l'écart quand le toolchain épinglé
-      # par le Dockerfile prend du retard.
+      # L'audit doit porter sur le Go qui part dans l'image, pas sur le dernier
+      # correctif publié. `check-latest` faisait l'inverse : il masquait le
+      # retard du toolchain épinglé au lieu de le révéler, et les CVE de la
+      # 1.27.1 sont restées invisibles ici jusqu'à ce que le registre les
+      # signale.
+      - name: Read the Go toolchain pinned by the Dockerfile
+        id: toolchain
+        run: |
+          version="$(sed -n 's/^FROM .*golang:\([0-9][0-9.]*\)-alpine.*/\1/p' Dockerfile | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "aucune version golang:<x.y.z>-alpine trouvée dans le Dockerfile" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.toolchain.outputs.version }}
           cache: false
 
       - name: Run govulncheck
