@@ -1,17 +1,43 @@
 version: 2
+
+# Les mises à jour arrivent sur `integration`, la branche de travail : une PR
+# fondue dans `main` y aurait fait avancer la publication sans passer par la
+# branche où tout le reste est vérifié.
+#
+# Chaque écosystème ouvre une seule PR groupée. Cinq PR séparées pour cinq
+# actions se relancent cinq fois sur la même CI, et il suffit qu'un outil
+# épinglé casse pour qu'elles rougissent toutes ensemble sans que la cause
+# soit lisible dans aucune d'elles.
 updates:
   - package-ecosystem: gomod
     directory: /
+    target-branch: integration
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      gomod:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
+    target-branch: integration
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
   - package-ecosystem: docker
     directory: /
+    target-branch: integration
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns:
+          - "*"

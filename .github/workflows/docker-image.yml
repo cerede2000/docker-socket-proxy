@@ -23,14 +23,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The toolchain must come from the Dockerfile and nowhere else, so go may
+    # not substitute a newer one behind the pin.
+    env:
+      GOTOOLCHAIN: local
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `go 1.27` in go.mod resolved to whatever patch was current, so the
+      # toolchain moved on its own under a pinned Staticcheck: 1.27.2 changed
+      # the export data format and 2026.2.1 stopped being able to read it,
+      # which failed every pull request at once, including the one bumping the
+      # image. Reading the pin instead ties that move to a reviewed change.
+      - name: Read the Go toolchain pinned by the Dockerfile
+        id: toolchain
+        run: |
+          version="$(sed -n 's/^FROM .*golang:\([0-9][0-9.]*\)-alpine.*/\1/p' Dockerfile | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "aucune version golang:<x.y.z>-alpine trouvée dans le Dockerfile" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.toolchain.outputs.version }}
           cache: false
 
       - name: Format check
@@ -73,7 +92,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Le runner fournit déjà un démon Docker : la suite construit l'image puis
       # éprouve la découverte par label, la portée conteneur, le filtrage des
@@ -83,7 +102,7 @@ jobs:
 
       - name: Upload proxy log
         if: failure()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-proxy-log
           path: e2e/proxy.log
@@ -101,7 +120,7 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4

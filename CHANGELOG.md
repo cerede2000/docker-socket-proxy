@@ -12,6 +12,9 @@ All notable changes are documented here. Release tags use semantic versioning.
 ### Changed
 
 - Staticcheck moves to 2026.2.2, the first release that reads the export data format of Go 1.27.2.
+- The test job takes its toolchain from the same Dockerfile pin. `go 1.27` in `go.mod` resolved to whichever patch was current, so Go moved on its own under a pinned linter: 1.27.2 changed the export data format, 2026.2.1 could no longer read it, and every open pull request failed at once — including the one bumping the image, which is why the fix sat unmerged. The toolchain now only moves with a reviewed change.
+- `actions/checkout` moves to 7.0.1, `actions/setup-go` to 7.0.0, `actions/upload-artifact` to 7.0.2 and `github/codeql-action` to 4.38.3.
+- Dependabot targets `integration` rather than the default branch, and opens one grouped pull request per ecosystem instead of one per dependency.
 
 ## 1.3.0 - 2026-09-25
 
