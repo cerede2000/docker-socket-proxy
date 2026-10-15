@@ -108,6 +108,13 @@ jobs:
       # corrigeable sur trois composants se corrige tout de suite.
       - name: Scan the built image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Trivy prend sa base sur mirror.gcr.io par défaut, et un échec de
+          # téléchargement ne l'arrête pas : il rend « 0 constat » sans avoir
+          # rien comparé. Vu le 2026-10-15, le miroir répondait BLOB_UNKNOWN.
+          # Le dépôt officiel passe en premier, le miroir reste en repli.
+          TRIVY_DB_REPOSITORY: "ghcr.io/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2"
+          TRIVY_SKIP_VERSION_CHECK: "true"
         with:
           image-ref: docker-socket-proxy:ci-scan
           version: v0.72.0
