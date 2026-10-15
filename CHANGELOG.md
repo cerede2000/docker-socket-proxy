@@ -2,6 +2,21 @@
 
 All notable changes are documented here. Release tags use semantic versioning.
 
+## Unreleased
+
+### Security
+
+- The built image is scanned before it is published. Nothing audited the artefact until now — only the sources — which is how a toolchain left behind in the image stayed invisible to every gate until the registry reported it. Trivy reads the Go version recorded in the binary, so it judges what the image carries rather than what `go.mod` declares. Held at Go 1.27.1 the gate reports three high and five medium findings and refuses the build; at 1.27.2 it passes.
+- A weekly `Registry audit` scans the published images themselves, on both registries, for `latest` and for the newest released tag. An image ages without a commit touching it: the advisories of 2026-10-08 reached `latest` with no push, and a workflow that only runs on push cannot see that. Rebuilding on a schedule would not replace this scan — the image is `scratch` and its toolchain is pinned by digest, so rebuilding the same commit yields the same vulnerable image. What fixes it is raising the pin; this is what asks for it.
+
+### Added
+
+- A `Release` workflow takes a version and does the rest: it refuses a `CHANGELOG.md` section that is missing or undated, refuses a head whose checks are not all green, refuses a `main` that would need a merge, then advances `main`, writes the annotated tag and publishes the release notes from the changelog section. It needs a `RELEASE_TOKEN` secret, because a push made with the default `GITHUB_TOKEN` does not trigger the publish workflow.
+
+### Changed
+
+- The Docker Hub repository description and README are synced on every release instead of being edited by hand.
+
 ## 1.3.1 - 2026-10-15
 
 ### Security

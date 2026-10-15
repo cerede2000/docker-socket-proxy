@@ -84,6 +84,40 @@ jobs:
           provenance: false
           sbom: false
 
+      # Un seul arch suffit pour le scan : les avis portent sur le toolchain et
+      # les modules, identiques d'une architecture à l'autre. Le build multi-arch
+      # au-dessus reste la preuve de la compilation croisée.
+      - name: Build the image to scan (amd64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: docker-socket-proxy:ci-scan
+          provenance: false
+          sbom: false
+
+      # Ce dépôt n'auditait que ses sources : le toolchain en retard dans
+      # l'image n'était visible d'aucune porte, et c'est le registre qui a
+      # signalé les avis du 2026-10-08. Trivy lit la version inscrite dans le
+      # binaire, donc il juge ce que l'image embarque, pas ce que go.mod
+      # déclare. L'image est `scratch`, il n'y a pas de paquet système à
+      # trouver : le périmètre est volontairement large, car un constat
+      # corrigeable sur trois composants se corrige tout de suite.
+      - name: Scan the built image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: docker-socket-proxy:ci-scan
+          version: v0.72.0
+          format: table
+          scanners: vuln
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+          exit-code: "1"
+
   e2e:
     name: End-to-end
     needs: ["test"]
@@ -180,6 +214,18 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+      # La page Docker Hub ne suit aucun push : elle restait sur la description
+      # d'une version antérieure jusqu'à ce que quelqu'un la modifie à la main.
+      - name: Sync the Docker Hub description
+        if: env.DOCKERHUB_USERNAME != '' && startsWith(github.ref, 'refs/tags/v')
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.dockerhub.outputs.image }}
+          short-description: ${{ github.event.repository.description }}
+          readme-filepath: ./README.md
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2

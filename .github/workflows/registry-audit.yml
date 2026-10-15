@@ -1,0 +1,102 @@
+name: Registry audit
+
+# Une image publiée vieillit sans qu'un commit la touche. Les treize avis du
+# 2026-10-08 sont arrivés dans `latest` sans un seul push, et aucune porte ne
+# regardait là : la CI ne se déclenche qu'au push, et l'audit de sources jugeait
+# le dépôt, pas l'artefact. Ce workflow scanne ce que les gens tirent.
+#
+# Reconstruire périodiquement ne remplacerait pas ce scan : l'image est
+# `scratch` et son toolchain est épinglé par digest, donc un build du même
+# commit produit la même image, vulnérable à l'identique. Ce qui corrige, c'est
+# la montée du pin ; ce workflow est ce qui la réclame.
+on:
+  schedule:
+    - cron: "41 6 * * 2"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: registry-audit
+  cancel-in-progress: true
+
+jobs:
+  tags:
+    name: Resolve the published tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      refs: ${{ steps.resolve.outputs.refs }}
+    steps:
+      # `latest` et l'étiquette exacte de la dernière sortie : la première est
+      # ce que tire une installation qui ne pense pas aux versions, la seconde
+      # ce que tire une installation qui épingle. Les deux doivent être saines.
+      - name: Resolve
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(gh release list --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts --exclude-pre-releases --limit 1 \
+            --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')"
+          if [ -z "$version" ]; then
+            echo "aucune sortie publiée : rien à auditer" >&2
+            exit 1
+          fi
+          refs="$(printf '%s\n' \
+            "docker.io/${GITHUB_REPOSITORY_OWNER}/docker-socket-proxy:latest" \
+            "docker.io/${GITHUB_REPOSITORY_OWNER}/docker-socket-proxy:${version}" \
+            "ghcr.io/${GITHUB_REPOSITORY_OWNER}/docker-socket-proxy:latest" \
+            "ghcr.io/${GITHUB_REPOSITORY_OWNER}/docker-socket-proxy:${version}" \
+            | jq -R . | jq -c -s .)"
+          echo "refs=${refs}" >> "$GITHUB_OUTPUT"
+          echo "À auditer : ${refs}"
+
+  scan:
+    name: ${{ matrix.ref }}
+    needs: [tags]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJson(needs.tags.outputs.refs) }}
+    steps:
+      - name: Log in to GitHub Container Registry
+        if: startsWith(matrix.ref, 'ghcr.io/')
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Le rapport complet d'abord, pour que le journal porte aussi ce qui ne
+      # fait pas échouer : une image sans paquet système n'a que trois
+      # composants, un constat MEDIUM y est déjà une information.
+      - name: Report every finding
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.ref }}
+          version: v0.72.0
+          format: table
+          scanners: vuln
+          vuln-type: library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Fail on fixable findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.ref }}
+          version: v0.72.0
+          format: table
+          scanners: vuln
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+          exit-code: "1"
